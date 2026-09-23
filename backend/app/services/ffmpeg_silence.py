@@ -1,3 +1,4 @@
+import json
 import math
 import re
 import subprocess
@@ -164,16 +165,30 @@ def render_without_silence(
     work_dir: Path,
     *,
     vcodec: str = "h264_nvenc",
+    keeps: list[tuple[float, float]] | None = None,
 ) -> dict[str, float]:
     """
     PROPÓSITO: Quitar silencios en un solo encode NVENC para conservar una línea de tiempo.
-    CONEXIONES: FFmpeg / h264_nvenc.
+    CONEXIONES: FFmpeg / h264_nvenc. keeps permite repetir el corte con tramos editados a mano.
     """
     duration = media_duration(source)
-    silences = detect_silences(source)
-    keeps = speech_ranges(silences, duration)
+    if keeps is None:
+        silences = detect_silences(source)
+        keeps = speech_ranges(silences, duration)
+    else:
+        cleaned: list[tuple[float, float]] = []
+        for start, end in sorted(keeps):
+            start = max(0.0, min(start, duration))
+            end = max(0.0, min(end, duration))
+            if end - start >= 0.08:
+                cleaned.append((start, end))
+        keeps = cleaned or [(0.0, duration)]
     work_dir.mkdir(parents=True, exist_ok=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
+    (work_dir / "keeps.json").write_text(
+        json.dumps([{"start": start, "end": end} for start, end in keeps]),
+        encoding="utf-8",
+    )
 
     lines: list[str] = []
     for index, (start, end) in enumerate(keeps):
