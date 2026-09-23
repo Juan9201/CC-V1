@@ -1,7 +1,7 @@
 from threading import Lock
 from uuid import uuid4
 
-from app.schemas.job import BatchJob, DownloadLinks, VideoItem
+from app.schemas.job import BatchJob, CaptionStyle, DownloadLinks, VideoItem
 
 _ACTIVE = {"cutting", "transcribing", "refining"}
 
@@ -16,10 +16,11 @@ class JobStore:
         self._jobs: dict[str, BatchJob] = {}
         self._lock = Lock()
 
-    def create(self, filenames: list[str]) -> BatchJob:
+    def create(self, filenames: list[str], style: CaptionStyle) -> BatchJob:
         job = BatchJob(
             job_id=uuid4().hex,
             status="queued",
+            style=style,
             items=[
                 VideoItem(file_id=uuid4().hex, filename=name, status="queued")
                 for name in filenames

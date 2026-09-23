@@ -1,10 +1,11 @@
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 
 from app.config import settings
 from app.schemas.job import BatchJob
+from app.services.caption_style import list_font_ids, parse_caption_style
 from app.services.worker import gpu_worker
 from app.storage.jobs import job_store
 
@@ -27,36 +28,40 @@ def _safe_name(name: str) -> str:
     return cleaned
 
 
-@router.post("", response_model=BatchJob, status_code=status.HTTP_202_ACCEPTED)
-async def create_job(files: list[UploadFile]) -> BatchJob:
+@router.get("/caption-options")
+async def caption_options() -> dict[str, list[str]]:
     """
-    PROPÓSITO: Recibir varios videos y encolarlos en el único worker de GPU.
-    CONEXIONES: Disco local. El corte y Whisper ocurren después, de a un archivo.
+    PROPÓSITO: Listar las fuentes y plantillas que la interfaz puede elegir.
+    CONEXIONES: Archivos de backend/fonts.
+    """
+    return {
+        "fonts": list_font_ids(),
+        "presets": ["pop", "highlight", "typewriter"],
+        "positions": ["bottom", "center"],
+        "sizes": ["sm", "md", "lg"],
+    }
+
+
+@router.post("", response_model=BatchJob, status_code=status.HTTP_202_ACCEPTED)
+async def create_job(
+    files: list[UploadFile] = File(...),
+    preset: str = Form("pop"),
+    font: str = Form("Inter"),
+    text_color: str = Form("#FFFFFF"),
+    highlight_color: str = Form("#FFE14A"),
+    position: str = Form("bottom"),
+    size: str = Form("md"),
+) -> BatchJob:
+    """
+    PROPÓSITO: Recibir varios videos y el estilo de subtítulos, y encolarlos en el worker.
+    CONEXIONES: Disco local. El corte, Whisper y el quemado ocurren después, de a un archivo.
     """
     if not files:
         raise HTTPException(status_code=400, detail="Sube al menos un video")
-
-    # #region agent log
-    import json
-    import time
-
-    with open(r"c:\AI CC\debug-03e0cf.log", "a", encoding="utf-8") as handle:
-        handle.write(
-            json.dumps(
-                {
-                    "sessionId": "03e0cf",
-                    "runId": "post-fix",
-                    "hypothesisId": "H4",
-                    "location": "jobs.py:create_job",
-                    "message": "upload reached api",
-                    "data": {"filenames": [item.filename for item in files]},
-                    "timestamp": int(time.time() * 1000),
-                },
-                ensure_ascii=False,
-            )
-            + "\n"
-        )
-    # #endregion
+    try:
+        style = parse_caption_style(preset, font, text_color, highlight_color, position, size)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     names: list[str] = []
     for upload in files:
@@ -65,7 +70,7 @@ async def create_job(files: list[UploadFile]) -> BatchJob:
             raise HTTPException(status_code=400, detail=f"Extensión no admitida: {filename}")
         names.append(filename)
 
-    job = job_store.create(names)
+    job = job_store.create(names, style)
     staged: list[tuple[str, Path]] = []
     for upload, item in zip(files, job.items, strict=True):
         suffix = Path(item.filename).suffix.lower()

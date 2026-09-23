@@ -30,7 +30,17 @@ class VideoItem(BaseModel):
     downloads: DownloadLinks = Field(default_factory=DownloadLinks)
 
 
+class CaptionStyle(BaseModel):
+    preset: Literal["pop", "highlight", "typewriter"] = "pop"
+    font: str = "Inter"
+    text_color: str = "#FFFFFF"
+    highlight_color: str = "#FFE14A"
+    position: Literal["bottom", "center"] = "bottom"
+    size: Literal["sm", "md", "lg"] = "md"
+
+
 class BatchJob(BaseModel):
     job_id: str
     status: JobPhase
+    style: CaptionStyle = Field(default_factory=CaptionStyle)
     items: list[VideoItem]

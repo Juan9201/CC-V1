@@ -41,8 +41,28 @@ export function BatchUploader() {
   const [job, setJob] = useState<BatchJob | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [preset, setPreset] = useState("pop");
+  const [font, setFont] = useState("Inter");
+  const [fonts, setFonts] = useState<string[]>(["Inter"]);
+  const [textColor, setTextColor] = useState("#ffffff");
+  const [highlightColor, setHighlightColor] = useState("#ffe14a");
+  const [position, setPosition] = useState("bottom");
+  const [size, setSize] = useState("md");
   const jobId = job?.job_id ?? null;
   const jobStatus = job?.status ?? null;
+
+  useEffect(() => {
+    fetch("/api/jobs/caption-options")
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data: { fonts?: string[] } | null) => {
+        if (!data?.fonts?.length) {
+          return;
+        }
+        setFonts(data.fonts);
+        setFont((current) => (data.fonts?.includes(current) ? current : data.fonts?.[0] ?? current));
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!jobId || jobStatus === "done" || jobStatus === "error") {
@@ -78,29 +98,15 @@ export function BatchUploader() {
     setFormError(null);
     const body = new FormData();
     files.forEach((file) => body.append("files", file));
+    body.append("preset", preset);
+    body.append("font", font);
+    body.append("text_color", textColor);
+    body.append("highlight_color", highlightColor);
+    body.append("position", position);
+    body.append("size", size);
     try {
       const response = await fetch("/api/jobs", { method: "POST", body });
       const raw = await response.text();
-      // #region agent log
-      fetch("http://127.0.0.1:7606/ingest/32bc73c6-598c-4dd0-9577-778f39477825", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "03e0cf" },
-        body: JSON.stringify({
-          sessionId: "03e0cf",
-          runId: "post-fix",
-          hypothesisId: "H1-H3",
-          location: "BatchUploader.tsx:submit",
-          message: "upload response",
-          data: {
-            status: response.status,
-            contentType: response.headers.get("content-type"),
-            bodyPrefix: raw.slice(0, 160),
-            fileBytes: files.map((file) => file.size),
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       let payload: { detail?: string } | null = null;
       try {
         payload = JSON.parse(raw) as { detail?: string };
@@ -163,6 +169,77 @@ export function BatchUploader() {
           ))}
         </ul>
       )}
+
+      <fieldset className="grid gap-4 rounded-xl border border-zinc-800 bg-zinc-900 p-4 sm:grid-cols-2">
+        <legend className="px-1 text-sm text-zinc-300">Subtítulos del lote</legend>
+        <label className="text-sm text-zinc-400">
+          Plantilla
+          <select
+            value={preset}
+            onChange={(event) => setPreset(event.target.value)}
+            className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100"
+          >
+            <option value="pop">Pop</option>
+            <option value="highlight">Resalte</option>
+            <option value="typewriter">Máquina de escribir</option>
+          </select>
+        </label>
+        <label className="text-sm text-zinc-400">
+          Fuente
+          <select
+            value={font}
+            onChange={(event) => setFont(event.target.value)}
+            className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100"
+          >
+            {fonts.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-sm text-zinc-400">
+          Color del texto
+          <input
+            type="color"
+            value={textColor}
+            onChange={(event) => setTextColor(event.target.value)}
+            className="mt-1 block h-10 w-full rounded-md border border-zinc-700 bg-zinc-950"
+          />
+        </label>
+        <label className="text-sm text-zinc-400">
+          Color del resalte
+          <input
+            type="color"
+            value={highlightColor}
+            onChange={(event) => setHighlightColor(event.target.value)}
+            className="mt-1 block h-10 w-full rounded-md border border-zinc-700 bg-zinc-950"
+          />
+        </label>
+        <label className="text-sm text-zinc-400">
+          Posición
+          <select
+            value={position}
+            onChange={(event) => setPosition(event.target.value)}
+            className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100"
+          >
+            <option value="bottom">Abajo</option>
+            <option value="center">Centro</option>
+          </select>
+        </label>
+        <label className="text-sm text-zinc-400">
+          Tamaño
+          <select
+            value={size}
+            onChange={(event) => setSize(event.target.value)}
+            className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100"
+          >
+            <option value="sm">Pequeño</option>
+            <option value="md">Mediano</option>
+            <option value="lg">Grande</option>
+          </select>
+        </label>
+      </fieldset>
 
       <button
         type="button"

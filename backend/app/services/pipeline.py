@@ -2,7 +2,8 @@ from pathlib import Path
 
 from app.config import settings
 from app.schemas.job import DownloadLinks
-from app.services import deepseek_subtitles, ffmpeg_silence, whisper_engine
+from app.schemas.job import CaptionStyle
+from app.services import caption_burn, deepseek_subtitles, ffmpeg_silence, whisper_engine
 from app.services.srt_io import render_srt
 from app.storage.jobs import job_store
 
@@ -28,6 +29,8 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
     srt_es = root / "subtitles.es.srt"
     srt_en = root / "subtitles.en.srt"
     wav_path = work / "speech.wav"
+    stored = job_store.get(job_id)
+    style = stored.style if stored is not None else CaptionStyle()
 
     def links() -> DownloadLinks:
         base = f"/api/jobs/{job_id}/files/{file_id}"
@@ -43,12 +46,12 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
         note = None
         if srt_es.exists():
             try:
-                ffmpeg_silence.burn_subtitles(video_out, srt_es, burned_es)
+                caption_burn.burn_srt(video_out, srt_es, burned_es, style, work / "burn-es")
             except Exception as exc:
                 note = f"No se pudo incrustar el subtítulo bilingüe: {exc}"
         if srt_en.exists():
             try:
-                ffmpeg_silence.burn_subtitles(video_out, srt_en, burned_en)
+                caption_burn.burn_srt(video_out, srt_en, burned_en, style, work / "burn-en")
             except Exception as exc:
                 note = f"No se pudo incrustar el subtítulo en inglés: {exc}"
         return note
@@ -67,7 +70,7 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
         english = deepseek_subtitles.translate_english(spanish)
         srt_es.write_text(render_srt(spanish), encoding="utf-8")
         srt_en.write_text(render_srt(english), encoding="utf-8")
-        job_store.update_item(job_id, file_id, status="refining", detail="Incrustando subtítulos")
+        job_store.update_item(job_id, file_id, status="refining", detail="Incrustando subtítulos animados")
         burn_note = burn_ready()
         job_store.set_downloads(job_id, file_id, links())
         if burn_note:

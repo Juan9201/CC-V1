@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 
 
@@ -50,6 +51,41 @@ def render_srt(cues: list[Cue]) -> str:
             f"{wrap_subtitle(cue.text)}"
         )
     return "\n\n".join(blocks) + "\n"
+
+
+_TIME = re.compile(
+    r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})"
+)
+
+
+def _clock(hours: str, minutes: str, seconds: str, millis: str) -> float:
+    return int(hours) * 3600 + int(minutes) * 60 + int(seconds) + int(millis) / 1000
+
+
+def parse_srt(text: str) -> list[Cue]:
+    """
+    PROPÓSITO: Recuperar cues desde un SRT ya escrito en disco.
+    CONEXIONES: Ninguna. El quemado animado usa estos tiempos, no los reescribe.
+    """
+    cues: list[Cue] = []
+    for block in re.split(r"\r?\n\s*\r?\n", text.strip()):
+        lines = [line.strip("\ufeff") for line in block.splitlines() if line.strip()]
+        match = None
+        time_index = 0
+        for index, line in enumerate(lines):
+            match = _TIME.search(line)
+            if match is not None:
+                time_index = index
+                break
+        if match is None:
+            continue
+        start = _clock(*match.group(1, 2, 3, 4))
+        end = _clock(*match.group(5, 6, 7, 8))
+        body = " ".join(lines[time_index + 1 :]).strip()
+        if not body or end <= start:
+            continue
+        cues.append(Cue(index=len(cues) + 1, start=start, end=end, text=body))
+    return cues
 
 
 def replace_text(cues: list[Cue], texts: list[str]) -> list[Cue]:
