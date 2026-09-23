@@ -5,6 +5,10 @@ from app.config import settings
 from app.schemas.job import CaptionStyle, CueDraft, DownloadLinks, Span
 from app.services import caption_burn, deepseek_subtitles, ffmpeg_silence, whisper_engine
 from app.services.review_gate import review_gate
+
+
+class JobCancelled(Exception):
+    """El operador sacó este video de la cola."""
 from app.services.srt_io import Cue, render_srt
 from app.storage.jobs import job_store
 
@@ -79,6 +83,7 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
         if not review:
             return
         review_gate.arm(job_id, file_id)
+        job_store.append_log(job_id, "review", detail)
         job_store.update_item(
             job_id,
             file_id,
@@ -88,6 +93,9 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
             **fields,
         )
         review_gate.wait(job_id, file_id)
+        if item_now().cancelled:
+            raise JobCancelled()
+        job_store.append_log(job_id, "review", "Continuó")
 
     def as_cues(drafts: list[CueDraft]) -> list[Cue]:
         rows: list[Cue] = []
@@ -115,14 +123,18 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
         return rows
 
     try:
+        if item_now().cancelled:
+            raise JobCancelled()
         keeps: list[tuple[float, float]] | None = None
         while True:
             job_store.update_item(job_id, file_id, status="cutting", detail="Quitando silencios con NVENC")
+            job_store.append_log(job_id, "ffmpeg", "Cortando silencios con NVENC")
             ffmpeg_silence.render_without_silence(source, video_out, work, keeps=keeps)
             saved = json.loads((work / "keeps.json").read_text(encoding="utf-8"))
             spans = [Span(start=row["start"], end=row["end"]) for row in saved]
             revision = item_now().cut_revision + 1
             job_store.update_item(job_id, file_id, keeps=spans, recut=False, cut_revision=revision)
+            job_store.append_log(job_id, "ffmpeg", f"Corte listo: {len(spans)} tramos")
             if not review:
                 break
             pause("review_cut", "Revisa el video cortado. Ajusta los tramos si hace falta.", recut=False)
@@ -130,12 +142,15 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
             if not edited.recut:
                 break
             keeps = [(span.start, span.end) for span in edited.keeps]
+            job_store.append_log(job_id, "ffmpeg", f"Recorte pedido con {len(keeps)} tramos")
 
         job_store.update_item(job_id, file_id, status="transcribing", detail="Alineando palabras en GPU")
+        job_store.append_log(job_id, "whisper", "Extrayendo audio y transcribiendo")
         ffmpeg_silence.extract_whisper_wav(video_out, wav_path)
         cues = whisper_engine.transcribe_spanish(wav_path)
         if not cues:
             raise RuntimeError("Whisper no devolvió palabras")
+        job_store.append_log(job_id, "whisper", f"Transcripción lista: {len(cues)} frases")
         pause(
             "review_cues",
             "Revisa el texto de Whisper antes de enviarlo a DeepSeek.",
@@ -152,7 +167,9 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
         else:
             detail = "Corrigiendo y traduciendo subtítulos"
         job_store.update_item(job_id, file_id, status="refining", detail=detail)
+        job_store.append_log(job_id, "deepseek", detail)
         spanish = deepseek_subtitles.correct_spanish(cues)
+        job_store.append_log(job_id, "deepseek", f"Español listo: {len(spanish)} frases")
         if review and want_es:
             pause(
                 "review_text",
@@ -165,7 +182,9 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
             srt_es.write_text(render_srt(spanish), encoding="utf-8")
         english: list[Cue] = []
         if want_en:
+            job_store.append_log(job_id, "deepseek", "Traduciendo al inglés")
             english = deepseek_subtitles.translate_english(spanish)
+            job_store.append_log(job_id, "deepseek", f"Inglés listo: {len(english)} frases")
             if review:
                 drafts = paired(spanish, english)
                 if want_es:
@@ -206,11 +225,17 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
                 srt_en.write_text(render_srt(english), encoding="utf-8")
 
         job_store.update_item(job_id, file_id, status="refining", detail="Incrustando subtítulos animados")
+        job_store.append_log(job_id, "ffmpeg", "Quemando subtítulos animados")
         burn_note = burn_ready()
+        job_store.append_log(job_id, "ffmpeg", burn_note or "Quemado listo", "warn" if burn_note else "info")
         job_store.set_downloads(job_id, file_id, links(item_now().cut_revision))
         if burn_note:
             job_store.update_item(job_id, file_id, detail=burn_note)
+    except JobCancelled:
+        job_store.append_log(job_id, "worker", "Killer eliminó este video de la cola", "warn")
+        return
     except Exception as exc:
+        job_store.append_log(job_id, "pipeline", str(exc), "error")
         burn_ready()
         ready = []
         if want_es and srt_es.exists():

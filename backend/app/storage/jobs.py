@@ -1,7 +1,8 @@
+import time
 from threading import Lock
 from uuid import uuid4
 
-from app.schemas.job import BatchJob, CaptionStyle, DownloadLinks, VideoItem
+from app.schemas.job import BatchJob, CaptionStyle, DownloadLinks, LogLine, VideoItem
 
 _ACTIVE = {
     "cutting",
@@ -52,6 +53,16 @@ class JobStore:
                 job.items[index] = item.model_copy(update=changes)
                 break
             self._refresh_status(job)
+
+    def append_log(self, job_id: str, source: str, message: str, level: str = "info") -> None:
+        line = LogLine(at=int(time.time() * 1000), level=level, source=source, message=message)  # type: ignore[arg-type]
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            job.logs.append(line)
+            if len(job.logs) > 400:
+                del job.logs[:-400]
 
     def update_style(self, job_id: str, **changes: object) -> None:
         with self._lock:

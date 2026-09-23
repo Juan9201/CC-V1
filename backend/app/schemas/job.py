@@ -51,6 +51,7 @@ class VideoItem(BaseModel):
     review_language: Literal["", "es", "en"] = ""
     recut: bool = False
     cut_revision: int = 0
+    cancelled: bool = False
 
 
 class CaptionStyle(BaseModel):
@@ -64,8 +65,16 @@ class CaptionStyle(BaseModel):
     mode: Literal["auto", "review"] = "auto"
 
 
+class LogLine(BaseModel):
+    at: int
+    level: Literal["info", "warn", "error"] = "info"
+    source: str
+    message: str
+
+
 class BatchJob(BaseModel):
     job_id: str
     status: JobPhase
     style: CaptionStyle = Field(default_factory=CaptionStyle)
     items: list[VideoItem]
+    logs: list[LogLine] = Field(default_factory=list)

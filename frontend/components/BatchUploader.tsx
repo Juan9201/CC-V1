@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState, type DragEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
 
 import { ReviewDesk } from "./ReviewDesk";
 
@@ -27,9 +27,30 @@ type VideoItem = {
   cut_revision: number;
 };
 
+type LogLine = {
+  at: number;
+  level: "info" | "warn" | "error";
+  source: string;
+  message: string;
+};
+
+type WorkerFile = {
+  job_id: string;
+  file_id: string;
+  filename: string;
+  status: string;
+  reviewing: boolean;
+};
+
+type WorkerWatch = {
+  active: WorkerFile | null;
+  queued: WorkerFile[];
+};
+
 type BatchJob = {
   job_id: string;
   status: string;
+  logs?: LogLine[];
   style: {
     preset: string;
     font: string;
@@ -70,12 +91,59 @@ export function BatchUploader() {
   const [position, setPosition] = useState("bottom");
   const [size, setSize] = useState("md");
   const [track, setTrack] = useState("both");
+  const [localLogs, setLocalLogs] = useState<LogLine[]>([]);
+  const logRef = useRef<HTMLDivElement>(null);
+  const splitRef = useRef<HTMLDivElement>(null);
+  const pollWarn = useRef("");
+  const [logsWidth, setLogsWidth] = useState(384);
+  const [workerWatch, setWorkerWatch] = useState<WorkerWatch>({ active: null, queued: [] });
   const [supervision, setSupervision] = useState(false);
   const jobId = job?.job_id ?? null;
   const jobStatus = job?.status ?? null;
 
   useLayoutEffect(() => {
     setSupervision(window.location.port === "3002");
+    const saved = Number(window.localStorage.getItem("cc-logs-width"));
+    if (saved >= 220 && saved <= 760) {
+      setLogsWidth(saved);
+    }
+    pushLog("info", "ui", `Página lista en el puerto ${window.location.port}`);
+  }, []);
+
+  function resizeLogs(event: ReactPointerEvent<HTMLElement>) {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = logsWidth;
+    const limit = splitRef.current?.getBoundingClientRect().width ?? 1100;
+    function move(next: PointerEvent) {
+      const width = startWidth - (next.clientX - startX);
+      setLogsWidth(Math.min(limit * 0.62, Math.max(220, width)));
+    }
+    function stop() {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      setLogsWidth((current) => {
+        window.localStorage.setItem("cc-logs-width", String(Math.round(current)));
+        return current;
+      });
+    }
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+  }
+
+  function pushLog(level: LogLine["level"], source: string, message: string) {
+    setLocalLogs((current) => [...current, { at: Date.now(), level, source, message }].slice(-200));
+  }
+
+  useEffect(() => {
+    const timer = window.setInterval(async () => {
+      const response = await fetch("/api/jobs/worker");
+      if (!response.ok) {
+        return;
+      }
+      setWorkerWatch((await response.json()) as WorkerWatch);
+    }, 1500);
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -98,6 +166,11 @@ export function BatchUploader() {
     const timer = window.setInterval(async () => {
       const response = await fetch(`/api/jobs/${jobId}`);
       if (!response.ok) {
+        const note = `${jobId}:${response.status}`;
+        if (pollWarn.current !== note) {
+          pollWarn.current = note;
+          pushLog("warn", "ui", `Consulta del lote falló: HTTP ${response.status}`);
+        }
         return;
       }
       const next = (await response.json()) as BatchJob;
@@ -108,7 +181,12 @@ export function BatchUploader() {
 
   function addFiles(list: FileList | File[]) {
     const incoming = Array.from(list).filter((file) => file.type.startsWith("video/"));
+    if (incoming.length === 0) {
+      pushLog("warn", "ui", "Ningún archivo era un video");
+      return;
+    }
     setFiles((current) => [...current, ...incoming]);
+    pushLog("info", "ui", `Listos para enviar: ${incoming.map((file) => file.name).join(", ")}`);
   }
 
   function onDrop(event: DragEvent<HTMLDivElement>) {
@@ -123,6 +201,7 @@ export function BatchUploader() {
     }
     setSubmitting(true);
     setFormError(null);
+    pushLog("info", "ui", `Enviando ${files.length} video(s) en modo ${mode === "review" ? "revisión" : "automático"}`);
     const body = new FormData();
     files.forEach((file) => body.append("files", file));
     body.append("preset", preset);
@@ -147,17 +226,48 @@ export function BatchUploader() {
       }
       setJob(payload as BatchJob);
       setFiles([]);
+      pushLog("info", "ui", `El API aceptó el lote ${(payload as BatchJob).job_id.slice(0, 8)}`);
     } catch (error) {
-      setFormError(error instanceof Error ? error.message : "Error de red");
+      const message = error instanceof Error ? error.message : "Error de red";
+      setFormError(message);
+      pushLog("error", "ui", message);
     } finally {
       setSubmitting(false);
     }
   }
 
   const busy = submitting || (jobStatus !== null && jobStatus !== "done" && jobStatus !== "error");
+  const engineLogs = [...localLogs, ...(job?.logs ?? [])].sort((left, right) => left.at - right.at);
+  const killTarget = workerWatch.active ?? workerWatch.queued[0] ?? null;
+  const lastWarn = engineLogs.findLastIndex((line) => line.level === "warn");
+
+  async function actWorker(action: "continue" | "kill") {
+    const target = action === "continue" ? workerWatch.active : killTarget;
+    const response = await fetch(`/api/jobs/worker/${action}`, { method: "POST" });
+    const payload = (await response.json().catch(() => null)) as { detail?: string; filename?: string } | null;
+    if (!response.ok) {
+      pushLog("error", "ui", payload?.detail ?? `No se pudo ${action}`);
+      return;
+    }
+    pushLog(
+      action === "kill" ? "warn" : "info",
+      "ui",
+      action === "kill"
+        ? `Killer elimina de la cola: ${payload?.filename ?? target?.filename ?? "el video"}`
+        : `Continue continúa: ${payload?.filename ?? target?.filename ?? "el video"}`,
+    );
+  }
+
+  useEffect(() => {
+    const node = logRef.current;
+    if (node) {
+      node.scrollTop = node.scrollHeight;
+    }
+  }, [engineLogs.length]);
 
   return (
-    <section className="mt-8 space-y-6">
+    <div ref={splitRef} className="mt-8 flex flex-col gap-6 lg:flex-row lg:items-stretch lg:gap-0">
+    <section className="min-w-0 flex-1 space-y-6">
       <div
         onDragOver={(event) => {
           event.preventDefault();
@@ -341,7 +451,68 @@ export function BatchUploader() {
         </ul>
       )}
     </section>
+    <button
+      type="button"
+      aria-label="Ancho de los logs"
+      onPointerDown={resizeLogs}
+      className="group hidden w-3 shrink-0 cursor-col-resize items-stretch justify-center border-0 bg-transparent p-0 lg:flex"
+    >
+      <span className="w-px bg-zinc-700 transition-colors group-hover:bg-emerald-400" />
+    </button>
+    <aside
+      className="sticky top-6 flex h-[calc(100vh-4.5rem)] w-full max-lg:!w-full shrink-0 flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950"
+      style={{ width: logsWidth }}
+    >
+      <div className="border-b border-zinc-800 px-3 py-2 text-xs uppercase tracking-wide text-zinc-400">Logs</div>
+      <div ref={logRef} className="min-h-0 flex-1 space-y-1 overflow-y-auto p-3 font-mono text-[11px] leading-relaxed">
+        {engineLogs.length === 0 && <p className="text-zinc-600">Esperando el motor…</p>}
+        {engineLogs.map((line, index) => (
+          <div key={`${line.at}-${index}`}>
+            <p className={line.level === "error" ? "text-red-400" : line.level === "warn" ? "text-amber-300" : "text-zinc-300"}>
+              <span className="text-zinc-600">{formatClock(line.at)}</span>{" "}
+              <span className="text-emerald-500">{line.source}</span> {line.message}
+            </p>
+            {index === lastWarn && (workerWatch.active || killTarget) && (
+              <div className="mt-2 mb-2 space-y-2 rounded-md border border-amber-400/40 bg-zinc-900 p-2 font-sans">
+                <p className="text-[11px] leading-snug text-amber-300">
+                  {workerWatch.active?.reviewing
+                    ? `Continue continúa: ${workerWatch.active.filename}`
+                    : "Continue: no hay un video detenido en revisión"}
+                </p>
+                <p className="text-[11px] leading-snug text-amber-300">
+                  {killTarget ? `Killer elimina de la cola: ${killTarget.filename}` : "Killer: la cola está vacía"}
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    disabled={!workerWatch.active?.reviewing}
+                    onClick={() => actWorker("continue")}
+                    className="rounded-md bg-emerald-500 px-3 py-1.5 text-xs font-medium text-zinc-950 disabled:opacity-40"
+                  >
+                    Continue
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!killTarget}
+                    onClick={() => actWorker("kill")}
+                    className="rounded-md border border-red-400 px-3 py-1.5 text-xs font-medium text-red-300 disabled:opacity-40"
+                  >
+                    Killer
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </aside>
+    </div>
   );
+}
+
+function formatClock(at: number) {
+  const date = new Date(at);
+  return [date.getHours(), date.getMinutes(), date.getSeconds()].map((part) => String(part).padStart(2, "0")).join(":");
 }
 
 function Download({ href, label }: { href: string | null; label: string }) {

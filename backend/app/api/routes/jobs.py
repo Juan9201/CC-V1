@@ -46,6 +46,56 @@ async def caption_options() -> dict[str, list[str]]:
     }
 
 
+@router.get("/worker")
+async def worker_status() -> dict[str, object]:
+    """
+    PROPÓSITO: Decir qué video tiene el worker y cuáles esperan en la cola.
+    CONEXIONES: GpuWorker y JobStore en memoria.
+    """
+    return gpu_worker.status()
+
+
+@router.post("/worker/continue")
+async def worker_continue() -> dict[str, object]:
+    """
+    PROPÓSITO: Soltar la revisión del video que tiene parado al worker.
+    CONEXIONES: ReviewGate. El pipeline sigue con ese mismo archivo.
+    """
+    active = gpu_worker.status().get("active")
+    if not isinstance(active, dict) or not active.get("reviewing"):
+        raise HTTPException(status_code=409, detail="No hay un video detenido en revisión")
+    review_gate.release(str(active["job_id"]), str(active["file_id"]))
+    job_store.append_log(str(active["job_id"]), "review", f"Continue: {active['filename']}")
+    return active
+
+
+@router.post("/worker/kill")
+async def worker_kill() -> dict[str, object]:
+    """
+    PROPÓSITO: Sacar de la cola el video que está bloqueando al worker.
+    CONEXIONES: Si está en revisión, suelta la espera y el pipeline se detiene.
+    """
+    report = gpu_worker.status()
+    active = report.get("active")
+    queued = report.get("queued")
+    target = active if isinstance(active, dict) else None
+    if target is None and isinstance(queued, list) and queued:
+        target = queued[0]
+    if not isinstance(target, dict):
+        raise HTTPException(status_code=409, detail="La cola está vacía")
+    job_store.update_item(
+        str(target["job_id"]),
+        str(target["file_id"]),
+        cancelled=True,
+        status="error",
+        error="Killer",
+        detail="Eliminado de la cola",
+    )
+    job_store.append_log(str(target["job_id"]), "worker", f"Killer elimina de la cola: {target['filename']}", "warn")
+    review_gate.release(str(target["job_id"]), str(target["file_id"]))
+    return target
+
+
 @router.post("", response_model=BatchJob, status_code=status.HTTP_202_ACCEPTED)
 async def create_job(
     files: list[UploadFile] = File(...),
@@ -90,6 +140,7 @@ async def create_job(
                 handle.write(chunk)
         staged.append((item.file_id, dest))
 
+    job_store.append_log(job.job_id, "api", f"Recibidos {len(staged)} video(s). Modo {style.mode}, idioma {style.track}.")
     gpu_worker.submit(job.job_id, staged)
     stored = job_store.get(job.job_id)
     return stored if stored is not None else job
