@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState, type DragEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type DragEvent } from "react";
+
+import { ReviewDesk } from "./ReviewDesk";
 
 type Downloads = {
   video: string | null;
@@ -13,23 +15,42 @@ type Downloads = {
 type VideoItem = {
   file_id: string;
   filename: string;
-  status: "queued" | "cutting" | "transcribing" | "refining" | "done" | "error";
+  status: string;
   detail: string;
   error: string | null;
   downloads: Downloads;
+  keeps: { start: number; end: number }[];
+  cues: { start: number; end: number; text: string; source: string; suggestion: string }[];
+  cues_en: { start: number; end: number; text: string; source: string; suggestion: string }[];
+  review_language: string;
+  recut: boolean;
+  cut_revision: number;
 };
 
 type BatchJob = {
   job_id: string;
   status: string;
+  style: {
+    preset: string;
+    font: string;
+    text_color: string;
+    highlight_color: string;
+    position: string;
+    size: string;
+    track: string;
+  };
   items: VideoItem[];
 };
 
-const LABELS: Record<VideoItem["status"], string> = {
+const LABELS: Record<string, string> = {
   queued: "En cola",
   cutting: "Cortando silencios",
   transcribing: "Transcribiendo",
   refining: "Refinando subtítulos",
+  review_cut: "Revisar corte",
+  review_cues: "Revisar transcripción",
+  review_text: "Revisar texto",
+  review_burn: "Previsualizar",
   done: "Listo",
   error: "Error",
 };
@@ -48,8 +69,14 @@ export function BatchUploader() {
   const [highlightColor, setHighlightColor] = useState("#ffe14a");
   const [position, setPosition] = useState("bottom");
   const [size, setSize] = useState("md");
+  const [track, setTrack] = useState("both");
+  const [supervision, setSupervision] = useState(false);
   const jobId = job?.job_id ?? null;
   const jobStatus = job?.status ?? null;
+
+  useLayoutEffect(() => {
+    setSupervision(window.location.port === "3002");
+  }, []);
 
   useEffect(() => {
     fetch("/api/jobs/caption-options")
@@ -90,7 +117,7 @@ export function BatchUploader() {
     addFiles(event.dataTransfer.files);
   }
 
-  async function submit() {
+  async function submit(mode: "auto" | "review") {
     if (files.length === 0) {
       return;
     }
@@ -104,6 +131,8 @@ export function BatchUploader() {
     body.append("highlight_color", highlightColor);
     body.append("position", position);
     body.append("size", size);
+    body.append("track", track);
+    body.append("mode", mode);
     try {
       const response = await fetch("/api/jobs", { method: "POST", body });
       const raw = await response.text();
@@ -172,6 +201,18 @@ export function BatchUploader() {
 
       <fieldset className="grid gap-4 rounded-xl border border-zinc-800 bg-zinc-900 p-4 sm:grid-cols-2">
         <legend className="px-1 text-sm text-zinc-300">Subtítulos del lote</legend>
+        <label className="text-sm text-zinc-400 sm:col-span-2">
+          Idioma
+          <select
+            value={track}
+            onChange={(event) => setTrack(event.target.value)}
+            className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100"
+          >
+            <option value="both">Español e inglés</option>
+            <option value="es">Solo español</option>
+            <option value="en">Solo inglés</option>
+          </select>
+        </label>
         <label className="text-sm text-zinc-400">
           Plantilla
           <select
@@ -241,14 +282,35 @@ export function BatchUploader() {
         </label>
       </fieldset>
 
-      <button
-        type="button"
-        disabled={files.length === 0 || busy}
-        onClick={submit}
-        className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-zinc-950 disabled:opacity-40"
-      >
-        {busy ? "Procesando…" : "Procesar lote"}
-      </button>
+      {supervision ? (
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={files.length === 0 || busy}
+            onClick={() => submit("auto")}
+            className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-zinc-950 disabled:opacity-40"
+          >
+            {busy ? "Procesando…" : "Automático"}
+          </button>
+          <button
+            type="button"
+            disabled={files.length === 0 || busy}
+            onClick={() => submit("review")}
+            className="rounded-md border border-emerald-500 px-4 py-2 text-sm font-medium text-emerald-300 disabled:opacity-40"
+          >
+            Revisar
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          disabled={files.length === 0 || busy}
+          onClick={() => submit("auto")}
+          className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-zinc-950 disabled:opacity-40"
+        >
+          {busy ? "Procesando…" : "Procesar lote"}
+        </button>
+      )}
 
       {formError && <p className="text-sm text-red-400">{formError}</p>}
 
@@ -258,11 +320,14 @@ export function BatchUploader() {
             <li key={item.file_id} className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
               <div className="flex items-center justify-between gap-4">
                 <p className="font-medium">{item.filename}</p>
-                <p className="text-xs uppercase tracking-wide text-zinc-400">{LABELS[item.status]}</p>
+                <p className="text-xs uppercase tracking-wide text-zinc-400">{LABELS[item.status] ?? item.status}</p>
               </div>
               <p className="mt-1 text-sm text-zinc-400">{item.detail}</p>
               {item.error && <p className="mt-2 text-sm text-red-400">{item.error}</p>}
-              {item.status === "done" || item.downloads.video || item.downloads.srt_es ? (
+              {supervision && item.status.startsWith("review_") && (
+                <ReviewDesk job={job} item={item} fonts={fonts} onJob={(next) => setJob(next as BatchJob)} />
+              )}
+              {item.status === "done" || (!item.status.startsWith("review_") && (item.downloads.video || item.downloads.srt_es)) ? (
                 <div className="mt-3 flex flex-wrap gap-2">
                   <Download href={item.downloads.video} label="Video limpio" />
                   <Download href={item.downloads.video_es} label="Video con subtítulos" />

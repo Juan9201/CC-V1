@@ -6,6 +6,8 @@ from app.schemas.job import CaptionStyle
 _PRESETS = {"pop", "highlight", "typewriter"}
 _POSITIONS = {"bottom", "center"}
 _SIZES = {"sm", "md", "lg"}
+_TRACKS = {"es", "en", "both"}
+_MODES = {"auto", "review"}
 _COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _FONT_FORMATS = {".woff2": "woff2", ".ttf": "truetype", ".otf": "opentype"}
 
@@ -48,6 +50,8 @@ def parse_caption_style(
     highlight_color: str,
     position: str,
     size: str,
+    track: str,
+    mode: str = "auto",
 ) -> CaptionStyle:
     """
     PROPÓSITO: Validar el estilo que llega con el lote.
@@ -59,6 +63,10 @@ def parse_caption_style(
         raise ValueError("Posición no válida")
     if size not in _SIZES:
         raise ValueError("Tamaño no válido")
+    if track not in _TRACKS:
+        raise ValueError("Idioma no válido")
+    if mode not in _MODES:
+        raise ValueError("Modo no válido")
     if _COLOR.fullmatch(text_color) is None or _COLOR.fullmatch(highlight_color) is None:
         raise ValueError("El color tiene que ser #RRGGBB")
     resolve_font(font)
@@ -69,4 +77,6 @@ def parse_caption_style(
         highlight_color=highlight_color.upper(),
         position=position,  # type: ignore[arg-type]
         size=size,  # type: ignore[arg-type]
+        track=track,  # type: ignore[arg-type]
+        mode=mode,  # type: ignore[arg-type]
     )

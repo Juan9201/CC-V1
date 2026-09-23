@@ -3,7 +3,15 @@ from uuid import uuid4
 
 from app.schemas.job import BatchJob, CaptionStyle, DownloadLinks, VideoItem
 
-_ACTIVE = {"cutting", "transcribing", "refining"}
+_ACTIVE = {
+    "cutting",
+    "transcribing",
+    "refining",
+    "review_cut",
+    "review_cues",
+    "review_text",
+    "review_burn",
+}
 
 
 class JobStore:
@@ -44,6 +52,11 @@ class JobStore:
                 job.items[index] = item.model_copy(update=changes)
                 break
             self._refresh_status(job)
+
+    def update_style(self, job_id: str, **changes: object) -> None:
+        with self._lock:
+            job = self._jobs[job_id]
+            job.style = job.style.model_copy(update=changes)
 
     def set_downloads(self, job_id: str, file_id: str, downloads: DownloadLinks) -> None:
         self.update_item(

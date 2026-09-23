@@ -8,6 +8,10 @@ JobPhase = Literal[
     "cutting",
     "transcribing",
     "refining",
+    "review_cut",
+    "review_cues",
+    "review_text",
+    "review_burn",
     "done",
     "error",
 ]
@@ -21,6 +25,19 @@ class DownloadLinks(BaseModel):
     video_en: str | None = None
 
 
+class Span(BaseModel):
+    start: float
+    end: float
+
+
+class CueDraft(BaseModel):
+    start: float
+    end: float
+    text: str
+    source: str = ""
+    suggestion: str = ""
+
+
 class VideoItem(BaseModel):
     file_id: str
     filename: str
@@ -28,6 +45,12 @@ class VideoItem(BaseModel):
     detail: str = ""
     error: str | None = None
     downloads: DownloadLinks = Field(default_factory=DownloadLinks)
+    keeps: list[Span] = Field(default_factory=list)
+    cues: list[CueDraft] = Field(default_factory=list)
+    cues_en: list[CueDraft] = Field(default_factory=list)
+    review_language: Literal["", "es", "en"] = ""
+    recut: bool = False
+    cut_revision: int = 0
 
 
 class CaptionStyle(BaseModel):
@@ -37,6 +60,8 @@ class CaptionStyle(BaseModel):
     highlight_color: str = "#FFE14A"
     position: Literal["bottom", "center"] = "bottom"
     size: Literal["sm", "md", "lg"] = "md"
+    track: Literal["es", "en", "both"] = "both"
+    mode: Literal["auto", "review"] = "auto"
 
 
 class BatchJob(BaseModel):

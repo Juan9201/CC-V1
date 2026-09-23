@@ -2,10 +2,12 @@ from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from app.config import settings
-from app.schemas.job import BatchJob
-from app.services.caption_style import list_font_ids, parse_caption_style
+from app.schemas.job import BatchJob, CueDraft, Span
+from app.services.caption_style import list_font_ids, parse_caption_style, resolve_font
+from app.services.review_gate import review_gate
 from app.services.worker import gpu_worker
 from app.storage.jobs import job_store
 
@@ -39,6 +41,8 @@ async def caption_options() -> dict[str, list[str]]:
         "presets": ["pop", "highlight", "typewriter"],
         "positions": ["bottom", "center"],
         "sizes": ["sm", "md", "lg"],
+        "tracks": ["both", "es", "en"],
+        "modes": ["auto", "review"],
     }
 
 
@@ -51,6 +55,8 @@ async def create_job(
     highlight_color: str = Form("#FFE14A"),
     position: str = Form("bottom"),
     size: str = Form("md"),
+    track: str = Form("both"),
+    mode: str = Form("auto"),
 ) -> BatchJob:
     """
     PROPÓSITO: Recibir varios videos y el estilo de subtítulos, y encolarlos en el worker.
@@ -59,7 +65,9 @@ async def create_job(
     if not files:
         raise HTTPException(status_code=400, detail="Sube al menos un video")
     try:
-        style = parse_caption_style(preset, font, text_color, highlight_color, position, size)
+        style = parse_caption_style(
+            preset, font, text_color, highlight_color, position, size, track, mode
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -85,6 +93,101 @@ async def create_job(
     gpu_worker.submit(job.job_id, staged)
     stored = job_store.get(job.job_id)
     return stored if stored is not None else job
+
+
+class ReviewBody(BaseModel):
+    keeps: list[Span] = Field(default_factory=list)
+    cues: list[CueDraft] = Field(default_factory=list)
+    cues_en: list[CueDraft] = Field(default_factory=list)
+    recut: bool = False
+    preset: str | None = None
+    font: str | None = None
+    text_color: str | None = None
+    highlight_color: str | None = None
+    position: str | None = None
+    size: str | None = None
+
+
+@router.get("/fonts/{font_id}")
+async def font_file(font_id: str) -> FileResponse:
+    """
+    PROPÓSITO: Servir una fuente de backend/fonts para la previsualización.
+    CONEXIONES: El nombre es el stem del archivo, nunca una ruta.
+    """
+    try:
+        path, _css_format = resolve_font(font_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    media = {
+        ".woff2": "font/woff2",
+        ".ttf": "font/ttf",
+        ".otf": "font/otf",
+    }.get(path.suffix.lower(), "application/octet-stream")
+    return FileResponse(path, media_type=media, filename=path.name)
+
+
+@router.put("/{job_id}/files/{file_id}/review", response_model=BatchJob)
+async def save_review(job_id: str, file_id: str, body: ReviewBody) -> BatchJob:
+    """
+    PROPÓSITO: Guardar cortes, frases y estilo mientras el worker está detenido.
+    CONEXIONES: JobStore en memoria. No reanuda el worker.
+    """
+    job = job_store.get(job_id)
+    if job is None or not any(item.file_id == file_id for item in job.items):
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
+    job_store.update_item(
+        job_id,
+        file_id,
+        keeps=body.keeps,
+        cues=body.cues,
+        cues_en=body.cues_en,
+        recut=body.recut,
+    )
+    style_changes = {
+        key: value
+        for key, value in {
+            "preset": body.preset,
+            "font": body.font,
+            "text_color": body.text_color,
+            "highlight_color": body.highlight_color,
+            "position": body.position,
+            "size": body.size,
+        }.items()
+        if value is not None
+    }
+    if style_changes:
+        try:
+            merged = job.style.model_copy(update=style_changes)
+            parse_caption_style(
+                merged.preset,
+                merged.font,
+                merged.text_color,
+                merged.highlight_color,
+                merged.position,
+                merged.size,
+                merged.track,
+                merged.mode,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        job_store.update_style(job_id, **style_changes)
+    stored = job_store.get(job_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail="Lote no encontrado")
+    return stored
+
+
+@router.post("/{job_id}/files/{file_id}/continue", response_model=BatchJob)
+async def continue_review(job_id: str, file_id: str) -> BatchJob:
+    """
+    PROPÓSITO: Soltar el worker para el siguiente paso del archivo en revisión.
+    CONEXIONES: ReviewGate. El worker ya debe estar esperando.
+    """
+    job = job_store.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Lote no encontrado")
+    review_gate.release(job_id, file_id)
+    return job
 
 
 @router.get("/{job_id}", response_model=BatchJob)
