@@ -34,6 +34,28 @@ type BatchJob = {
 };
 
 const SIZE_RATIO = { sm: 0.034, md: 0.048, lg: 0.064 } as const;
+const UNDO_LIMIT = 5;
+
+type Draft = {
+  keeps: Span[];
+  cues: CueDraft[];
+  cuesEn: CueDraft[];
+  style: Style;
+};
+
+function cloneDraft(draft: Draft): Draft {
+  return structuredClone(draft);
+}
+
+function changedIndex<T>(previous: T[], next: T[]) {
+  const count = Math.max(previous.length, next.length);
+  for (let index = 0; index < count; index += 1) {
+    if (JSON.stringify(previous[index]) !== JSON.stringify(next[index])) {
+      return index;
+    }
+  }
+  return 0;
+}
 
 export function ReviewDesk({
   job,
@@ -58,8 +80,13 @@ export function ReviewDesk({
   const [boxHeight, setBoxHeight] = useState(360);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [undoLeft, setUndoLeft] = useState(0);
   const snapshot = useRef(item);
   const styleSnapshot = useRef(job.style);
+  const present = useRef<Draft>(cloneDraft({ keeps: item.keeps, cues: item.cues, cuesEn: item.cues_en, style: job.style }));
+  const past = useRef<Draft[]>([]);
+  const gesture = useRef<{ id: string; at: number } | null>(null);
+  const undoRef = useRef(() => {});
   snapshot.current = item;
   styleSnapshot.current = job.style;
   const cutting = item.status === "review_cut";
@@ -85,12 +112,125 @@ export function ReviewDesk({
     setStyle(incoming);
     setPreviewTrack(current.review_language === "en" || incoming.track === "en" ? "en" : "es");
     setError(null);
+    present.current = cloneDraft({
+      keeps: current.keeps,
+      cues: current.cues,
+      cuesEn: current.cues_en,
+      style: incoming,
+    });
+    past.current = [];
+    gesture.current = null;
+    setUndoLeft(0);
   }, [stamp]);
+
+  function publish(next: Draft) {
+    present.current = next;
+    setKeeps(next.keeps);
+    setCues(next.cues);
+    setCuesEn(next.cuesEn);
+    setStyle(next.style);
+  }
+
+  function applyDraft(next: Draft, gestureId: string, coalesceMs: number) {
+    if (JSON.stringify(present.current) === JSON.stringify(next)) {
+      return;
+    }
+    const now = performance.now();
+    const hot = coalesceMs > 0 && gesture.current?.id === gestureId && now - gesture.current.at < coalesceMs;
+    if (!hot) {
+      past.current = [...past.current, cloneDraft(present.current)].slice(-UNDO_LIMIT);
+      setUndoLeft(past.current.length);
+    }
+    gesture.current = { id: gestureId, at: now };
+    publish(cloneDraft(next));
+  }
+
+  function undo() {
+    const previous = past.current.pop();
+    if (!previous) {
+      return;
+    }
+    gesture.current = null;
+    publish(previous);
+    setUndoLeft(past.current.length);
+  }
+
+  undoRef.current = undo;
+
+  function editKeeps(next: Span[]) {
+    const dropped = next.length < present.current.keeps.length;
+    const index = changedIndex(present.current.keeps, next);
+    applyDraft(
+      { ...present.current, keeps: next },
+      dropped ? `drop-keep-${index}-${past.current.length}` : `keep-${index}`,
+      dropped ? 0 : 700,
+    );
+  }
+
+  function editCues(next: CueDraft[], english: boolean) {
+    const key = english ? "cuesEn" : "cues";
+    const previous = present.current[key];
+    const dropped = next.length < previous.length;
+    const index = changedIndex(previous, next);
+    const textOnly =
+      !dropped &&
+      next.length === previous.length &&
+      next[index] !== undefined &&
+      previous[index] !== undefined &&
+      next[index].text !== previous[index].text &&
+      next[index].start === previous[index].start &&
+      next[index].end === previous[index].end;
+    applyDraft(
+      { ...present.current, [key]: next },
+      dropped ? `drop-${key}-${index}-${past.current.length}` : `${key}-${index}-${textOnly ? "text" : "time"}`,
+      dropped ? 0 : textOnly ? 1500 : 700,
+    );
+  }
+
+  function editStyle(patch: Partial<Style>) {
+    const field = Object.keys(patch)[0] ?? "style";
+    applyDraft(
+      { ...present.current, style: { ...present.current.style, ...patch } },
+      `style-${field}`,
+      field.includes("color") ? 600 : 0,
+    );
+  }
+
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if (event.key.toLowerCase() !== "z" || event.shiftKey || event.altKey || !(event.ctrlKey || event.metaKey)) {
+        return;
+      }
+      if (past.current.length === 0) {
+        return;
+      }
+      event.preventDefault();
+      undoRef.current();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   useEffect(() => {
     const face = new FontFace("ReviewCaption", `url(/api/jobs/fonts/${encodeURIComponent(style.font)})`);
     face.load().then((loaded) => document.fonts.add(loaded)).catch(() => {});
   }, [style.font]);
+
+  useEffect(() => {
+    if (!cutting) {
+      return;
+    }
+    let frame = 0;
+    const tick = () => {
+      const video = videoRef.current;
+      if (video && !video.paused && !video.ended) {
+        setPlayhead(video.currentTime);
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [cutting]);
 
   function seek(seconds: number) {
     const video = videoRef.current;
@@ -161,22 +301,30 @@ export function ReviewDesk({
         </div>
       )}
 
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-xs text-zinc-500">Ctrl+Z deshace un borrado o un cambio. Se recuerdan los últimos 5.</p>
+        <button
+          type="button"
+          disabled={undoLeft === 0 || busy}
+          onClick={() => undoRef.current()}
+          className="rounded-md border border-zinc-600 px-3 py-1 text-xs text-zinc-200 disabled:opacity-40"
+        >
+          Deshacer{undoLeft > 0 ? ` ${undoLeft}` : ""}
+        </button>
+      </div>
+
       {cutting ? (
         <SpanEditor
           rows={keeps}
+          playhead={playhead}
           clock="Estos tiempos son del video original. El reproductor muestra el corte actual."
-          onChange={setKeeps}
+          onChange={editKeeps}
+          onSeek={seek}
         />
       ) : (
         <CueEditor
           rows={shown}
-          onChange={(next) => {
-            if ((burning && previewTrack === "en" && job.style.track === "both") || editingEnglish) {
-              setCuesEn(next);
-            } else {
-              setCues(next);
-            }
-          }}
+          onChange={(next) => editCues(next, (burning && previewTrack === "en" && job.style.track === "both") || editingEnglish)}
           onSeek={seek}
         />
       )}
@@ -194,32 +342,32 @@ export function ReviewDesk({
 
       {burning && (
         <div className="grid gap-3 sm:grid-cols-3">
-          <Select label="Plantilla" value={style.preset} onChange={(preset) => setStyle({ ...style, preset })}>
+          <Select label="Plantilla" value={style.preset} onChange={(preset) => editStyle({ preset })}>
             <option value="pop">Pop</option>
             <option value="highlight">Resalte</option>
             <option value="typewriter">Máquina de escribir</option>
           </Select>
-          <Select label="Fuente" value={style.font} onChange={(font) => setStyle({ ...style, font })}>
+          <Select label="Fuente" value={style.font} onChange={(font) => editStyle({ font })}>
             {fonts.map((name) => (
               <option key={name} value={name}>
                 {name}
               </option>
             ))}
           </Select>
-          <Select label="Posición" value={style.position} onChange={(position) => setStyle({ ...style, position })}>
+          <Select label="Posición" value={style.position} onChange={(position) => editStyle({ position })}>
             <option value="bottom">Abajo</option>
             <option value="center">Centro</option>
           </Select>
-          <Select label="Tamaño" value={style.size} onChange={(size) => setStyle({ ...style, size })}>
+          <Select label="Tamaño" value={style.size} onChange={(size) => editStyle({ size })}>
             <option value="sm">Pequeño</option>
             <option value="md">Mediano</option>
             <option value="lg">Grande</option>
           </Select>
-          <Color label="Texto" value={style.text_color} onChange={(text_color) => setStyle({ ...style, text_color })} />
+          <Color label="Texto" value={style.text_color} onChange={(text_color) => editStyle({ text_color })} />
           <Color
             label="Resalte"
             value={style.highlight_color}
-            onChange={(highlight_color) => setStyle({ ...style, highlight_color })}
+            onChange={(highlight_color) => editStyle({ highlight_color })}
           />
         </div>
       )}
@@ -305,32 +453,121 @@ function CaptionOverlay({
 
 function SpanEditor({
   rows,
+  playhead,
   clock,
   onChange,
+  onSeek,
 }: {
   rows: Span[];
+  playhead: number;
   clock: string;
   onChange: (rows: Span[]) => void;
+  onSeek: (seconds: number) => void;
 }) {
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const rowRef = useRef<HTMLDivElement>(null);
+  const laid = layoutKeeps(rows);
+  const marker = markerAt(laid, playhead);
+
+  useEffect(() => {
+    const scroller = scrollerRef.current;
+    const row = rowRef.current;
+    if (!scroller || !row) {
+      return;
+    }
+    const next = row.offsetTop - scroller.clientHeight / 3;
+    scroller.scrollTo({ top: Math.max(0, next) });
+  }, [marker.index]);
+
   return (
     <div className="space-y-2">
       <p className="text-xs text-zinc-500">{clock}</p>
-      {rows.map((row, index) => (
-        <div key={index} className="flex flex-wrap items-center gap-2 text-sm">
-          <span className="w-6 text-emerald-400">{index + 1}</span>
-          <Time value={row.start} onChange={(start) => onChange(rows.map((item, i) => (i === index ? { ...item, start } : item)))} />
-          <Time value={row.end} onChange={(end) => onChange(rows.map((item, i) => (i === index ? { ...item, end } : item)))} />
-          <button
-            type="button"
-            className="text-zinc-500"
-            onClick={() => onChange(rows.filter((_, i) => i !== index))}
-          >
-            Quitar
-          </button>
-        </div>
-      ))}
+      <div ref={scrollerRef} className="relative max-h-96 overflow-y-auto pr-1">
+        {laid.items.map((item) => {
+          const active = item.index === marker.index;
+          return (
+            <div key={item.index}>
+              {item.removed > 0.05 && (
+                <p className="flex h-[22px] items-center pl-8 text-[11px] text-zinc-600">
+                  se quitan {item.removed.toFixed(2)} s
+                </p>
+              )}
+              <div
+                ref={active ? rowRef : undefined}
+                className="relative flex items-center gap-2 pl-7 text-sm"
+                style={{ height: item.height }}
+                onClick={(event) => {
+                  if ((event.target as HTMLElement).closest("input, button")) {
+                    return;
+                  }
+                  onSeek(item.cutStart);
+                }}
+              >
+                {active && (
+                  <div className="pointer-events-none absolute inset-y-0 right-0 left-6 rounded-md bg-emerald-400/15 ring-1 ring-emerald-400/50" />
+                )}
+                {active && (
+                  <svg
+                    viewBox="0 0 12 16"
+                    className="pointer-events-none absolute top-1/2 left-3 z-20 h-4 w-3 -translate-y-1/2 drop-shadow-[0_0_6px_rgba(52,211,153,0.85)]"
+                    aria-hidden
+                  >
+                    <polygon points="0,0.75 11.25,8 0,15.25" fill="#34d399" />
+                  </svg>
+                )}
+                <span className="relative z-10 w-6 text-emerald-400">{item.index + 1}</span>
+                <Time
+                  value={item.row.start}
+                  onChange={(start) => onChange(rows.map((row, i) => (i === item.index ? { ...row, start } : row)))}
+                />
+                <Time
+                  value={item.row.end}
+                  onChange={(end) => onChange(rows.map((row, i) => (i === item.index ? { ...row, end } : row)))}
+                />
+                <button
+                  type="button"
+                  className="relative z-10 text-zinc-500"
+                  onClick={() => onChange(rows.filter((_, i) => i !== item.index))}
+                >
+                  Quitar
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
+}
+
+function layoutKeeps(rows: Span[]) {
+  const items: { index: number; row: Span; cutStart: number; duration: number; height: number; top: number; removed: number }[] = [];
+  let cut = 0;
+  let top = 0;
+  rows.forEach((row, index) => {
+    const duration = Math.max(0, row.end - row.start);
+    const previous = index > 0 ? rows[index - 1].end : row.start;
+    const removed = index > 0 ? Math.max(0, row.start - previous) : 0;
+    if (removed > 0.05) {
+      top += 22;
+    }
+    const height = Math.min(140, Math.max(44, duration * 22));
+    items.push({ index, row, cutStart: cut, duration, height, top, removed });
+    top += height;
+    cut += duration;
+  });
+  return { items, totalCut: cut };
+}
+
+function markerAt(laid: ReturnType<typeof layoutKeeps>, playhead: number) {
+  const last = laid.items.length - 1;
+  for (const item of laid.items) {
+    const end = item.cutStart + item.duration;
+    if (playhead < end || item.index === last) {
+      return { index: item.index };
+    }
+  }
+  return { index: 0 };
 }
 
 function CueEditor({
