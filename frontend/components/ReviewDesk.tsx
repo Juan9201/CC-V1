@@ -209,6 +209,20 @@ export function ReviewDesk({
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
+      const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement;
+      if (event.key === " " && !typing && !event.repeat) {
+        event.preventDefault();
+        const video = videoRef.current;
+        if (!video) {
+          return;
+        }
+        if (video.paused) {
+          void video.play();
+        } else {
+          video.pause();
+        }
+        return;
+      }
       if (event.key.toLowerCase() !== "z" || event.shiftKey || event.altKey || !(event.ctrlKey || event.metaKey)) {
         return;
       }
@@ -444,7 +458,7 @@ function BilingualPreview({
     return null;
   }
   return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-[6%] flex flex-col items-center gap-1 px-4">
+    <div className="pointer-events-none absolute inset-x-0 bottom-16 z-30 flex flex-col items-center gap-1 px-4">
       {english && <CaptionLine cue={english} time={time} words={words} style={style} height={height} />}
       {spanish && <CaptionLine cue={spanish} time={time} words={words} style={style} height={height} />}
     </div>
@@ -464,14 +478,32 @@ function CaptionLine({
   style: Style;
   height: number;
 }) {
-  const tokens = cue.text.split(/\s+/).filter(Boolean);
+  const tokens = presentWords(cue.text);
+  const shown = tokens.join(" ");
+  const duration = Math.max(0.2, cue.end - cue.start);
+  const local = Math.max(0, time - cue.start);
+  const intro = Math.min(0.18, duration * 0.3);
+  const pop = Math.min(1, local / Math.max(intro, 0.04));
   const heard = words.filter((word) => word.end > cue.start && word.start < cue.end);
   const highlightAt = heard.findIndex((word) => time >= word.start && time < word.end);
   const ratio = SIZE_RATIO[style.size as keyof typeof SIZE_RATIO] ?? SIZE_RATIO.md;
+  const typed =
+    style.preset === "typewriter"
+      ? shown.slice(0, Math.max(1, Math.ceil((Math.min(local, duration * 0.45) / (duration * 0.45)) * shown.length)))
+      : shown;
+  const motion =
+    style.preset === "pop" || style.preset === "highlight"
+      ? { opacity: pop, transform: `translateY(${(1 - pop) * 12}px) scale(${0.92 + pop * 0.08})` }
+      : undefined;
   return (
     <p
       className="max-w-[92%] rounded-md bg-black/55 px-3 py-1 text-center font-semibold leading-tight"
-      style={{ fontFamily: "ReviewCaption, Inter, sans-serif", fontSize: Math.max(15, height * ratio * 0.72), color: style.text_color }}
+      style={{
+        fontFamily: "ReviewCaption, Inter, sans-serif",
+        fontSize: Math.max(15, height * ratio * 0.72),
+        color: style.text_color,
+        ...motion,
+      }}
     >
       {style.preset === "highlight"
         ? tokens.map((token, index) => (
@@ -480,9 +512,28 @@ function CaptionLine({
               {token}
             </span>
           ))
-        : cue.text}
+        : typed}
     </p>
   );
+}
+
+function presentWords(text: string) {
+  let open = false;
+  return text.split(/\s+/).filter(Boolean).map((token) => {
+    let word = token;
+    let upper = open;
+    if (word.startsWith("*")) {
+      upper = true;
+      open = true;
+      word = word.replace(/^\*+/, "");
+    }
+    if (word.endsWith("*")) {
+      upper = true;
+      open = false;
+      word = word.replace(/\*+$/, "");
+    }
+    return upper ? word.toLocaleUpperCase("es-ES") : word;
+  });
 }
 
 function WordLane({

@@ -1,3 +1,22 @@
+function presentWords(text) {
+  let open = false;
+  return text.split(/\s+/).filter(Boolean).map((token) => {
+    let word = token;
+    let upper = open;
+    if (word.startsWith("*")) {
+      upper = true;
+      open = true;
+      word = word.replace(/^\*+/, "");
+    }
+    if (word.endsWith("*")) {
+      upper = true;
+      open = false;
+      word = word.replace(/\*+$/, "");
+    }
+    return upper ? word.toLocaleUpperCase("es-ES") : word;
+  });
+}
+
 function buildCue(spec) {
   const stage = document.getElementById("stage");
   stage.replaceChildren();
@@ -5,8 +24,8 @@ function buildCue(spec) {
   line.className = "line";
   line.style.color = spec.textColor;
   line.style.fontSize = spec.fontPx + "px";
-  const pieces =
-    spec.preset === "typewriter" ? Array.from(spec.text) : spec.text.split(/\s+/).filter(Boolean);
+  const shown = presentWords(spec.text).join(" ");
+  const pieces = spec.preset === "typewriter" ? Array.from(shown) : shown.split(/\s+/).filter(Boolean);
   const tokens = pieces.map((piece) => {
     const el = document.createElement("span");
     el.className = "token";
