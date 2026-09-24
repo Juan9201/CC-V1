@@ -14,6 +14,7 @@ type Style = {
   position: string;
   size: string;
   track: string;
+  caption_preview?: boolean;
 };
 
 type ReviewItem = {
@@ -265,6 +266,7 @@ export function ReviewDesk({
       highlight_color: style.highlight_color,
       position: style.position,
       size: style.size,
+      caption_preview: Boolean(style.caption_preview),
     };
     try {
       const saved = await fetch(`/api/jobs/${job.job_id}/files/${item.file_id}/review`, {
@@ -303,7 +305,7 @@ export function ReviewDesk({
             onTimeUpdate={(event) => setPlayhead(event.currentTarget.currentTime)}
             onLoadedMetadata={(event) => setBoxHeight(event.currentTarget.clientHeight || 360)}
           />
-          {burning && (
+          {!cutting && style.caption_preview && (
             <BilingualPreview cues={cues} words={item.words ?? []} time={playhead} style={style} height={boxHeight} />
           )}
         </div>
@@ -320,6 +322,15 @@ export function ReviewDesk({
 
       <div className="flex items-center justify-between gap-3">
         <p className="text-xs text-zinc-500">Ctrl+Z deshace un borrado o un cambio. Se recuerdan los últimos 5.</p>
+        {!cutting && (
+          <button
+            type="button"
+            onClick={() => editStyle({ caption_preview: !style.caption_preview })}
+            className={`rounded-md border px-3 py-1 text-xs ${style.caption_preview ? "border-emerald-500 text-emerald-300" : "border-zinc-600 text-zinc-300"}`}
+          >
+            {style.caption_preview ? "Letrero visible" : "Letrero oculto"}
+          </button>
+        )}
         <button
           type="button"
           disabled={undoLeft === 0 || busy}
@@ -487,46 +498,58 @@ function WordLane({
   onSeek: (seconds: number) => void;
   onChange: (rows: CueDraft[]) => void;
 }) {
-  const pps = 64;
+  const frame = 1 / 30;
+  const [pps, setPps] = useState(160);
   const duration = Math.max(words[words.length - 1]?.end ?? 1, ...cues.map((cue) => cue.end));
   const width = Math.max(duration * pps, 320);
 
-  function snap(time: number, edge: "start" | "end", lang: string) {
+  function quantize(time: number) {
+    return Math.round(Math.max(0, time) / frame) * frame;
+  }
+
+  function magnet(time: number, edge: "start" | "end", lang: string) {
+    const framed = quantize(time);
     const pool = words.filter((word) => !lang || !word.lang || word.lang === lang);
     const points = pool.map((word) => (edge === "start" ? word.start : word.end));
     if (points.length === 0) {
-      return time;
+      return framed;
     }
-    return points.reduce((best, point) => (Math.abs(point - time) < Math.abs(best - time) ? point : best));
-  }
-
-  function rewrite(row: CueDraft, start: number, end: number): CueDraft {
-    const lang = row.lang || "";
-    const inside = words.filter(
-      (word) => word.start >= start - 0.04 && word.end <= end + 0.04 && (!lang || !word.lang || word.lang === lang),
-    );
-    if (inside.length === 0 || end <= start) {
-      return row;
-    }
-    return {
-      ...row,
-      start: inside[0].start,
-      end: inside[inside.length - 1].end,
-      text: inside.map((word) => word.text).join(" "),
-      lang: (lang || inside.find((word) => word.lang)?.lang || "") as CueDraft["lang"],
-    };
+    const nearest = points.reduce((best, point) => (Math.abs(point - framed) < Math.abs(best - framed) ? point : best));
+    return Math.abs(nearest - framed) <= frame * 2 ? nearest : framed;
   }
 
   function drag(index: number, edge: "start" | "end", event: ReactPointerEvent<HTMLButtonElement>) {
     event.preventDefault();
+    event.stopPropagation();
     const row = cues[index];
     const origin = edge === "start" ? row.start : row.end;
     const pointer = event.clientX;
     const move = (ev: PointerEvent) => {
-      const nextTime = snap(origin + (ev.clientX - pointer) / pps, edge, row.lang || "");
-      const start = edge === "start" ? Math.min(nextTime, row.end - 0.08) : row.start;
-      const end = edge === "end" ? Math.max(nextTime, row.start + 0.08) : row.end;
-      onChange(cues.map((item, itemIndex) => (itemIndex === index ? rewrite(row, start, end) : item)));
+      const nextTime = magnet(origin + (ev.clientX - pointer) / pps, edge, row.lang || "");
+      const start = edge === "start" ? Math.min(nextTime, row.end - frame) : row.start;
+      const end = edge === "end" ? Math.max(nextTime, row.start + frame) : row.end;
+      onChange(cues.map((item, itemIndex) => (itemIndex === index ? { ...row, start, end } : item)));
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+  }
+
+  function shift(index: number, event: ReactPointerEvent<HTMLSpanElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    const row = cues[index];
+    const pointer = event.clientX;
+    const move = (ev: PointerEvent) => {
+      const delta = quantize((ev.clientX - pointer) / pps);
+      onChange(
+        cues.map((item, itemIndex) =>
+          itemIndex === index ? { ...row, start: Math.max(0, row.start + delta), end: row.end + delta } : item,
+        ),
+      );
     };
     const stop = () => {
       window.removeEventListener("pointermove", move);
@@ -537,35 +560,39 @@ function WordLane({
   }
 
   function splitAtPlayhead() {
-    const index = cues.findIndex((cue) => playhead > cue.start + 0.08 && playhead < cue.end - 0.08);
+    const cut = quantize(playhead);
+    const index = cues.findIndex((cue) => cut > cue.start + frame && cut < cue.end - frame);
     if (index < 0) {
       return;
     }
     const row = cues[index];
     const lang = row.lang || "";
     const inside = words.filter(
-      (word) => word.start >= row.start - 0.04 && word.end <= row.end + 0.04 && (!lang || !word.lang || word.lang === lang),
+      (word) => word.end > row.start && word.start < row.end && (!lang || !word.lang || word.lang === lang),
     );
-    const cut = inside.findIndex((word) => word.start >= playhead - 0.02);
-    if (cut <= 0 || cut >= inside.length) {
-      return;
-    }
-    const pack = (group: WordTick[]): CueDraft => ({
-      ...row,
-      start: group[0].start,
-      end: group[group.length - 1].end,
-      text: group.map((word) => word.text).join(" "),
-    });
-    onChange([...cues.slice(0, index), pack(inside.slice(0, cut)), pack(inside.slice(cut)), ...cues.slice(index + 1)]);
+    const leftWords = inside.filter((word) => (word.start + word.end) / 2 < cut);
+    const rightWords = inside.filter((word) => (word.start + word.end) / 2 >= cut);
+    const textOf = (group: WordTick[], fallback: string) => (group.length > 0 ? group.map((word) => word.text).join(" ") : fallback);
+    const left: CueDraft = { ...row, end: cut, text: textOf(leftWords, row.text) };
+    const right: CueDraft = { ...row, start: cut, text: textOf(rightWords, leftWords.length > 0 ? "" : row.text) };
+    onChange([...cues.slice(0, index), left, right, ...cues.slice(index + 1)]);
   }
 
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
-        <p className="text-xs text-zinc-500">Arrastra el borde de un cue y encaja en una palabra. Inglés arriba, español abajo.</p>
-        <button type="button" onClick={splitAtPlayhead} className="rounded-md border border-zinc-600 px-2 py-1 text-xs text-zinc-200">
-          Partir
-        </button>
+        <p className="text-xs text-zinc-500">El borde se mueve de fotograma en fotograma. Se pega a una palabra solo si pasas muy cerca.</p>
+        <div className="flex gap-2">
+          <button type="button" onClick={() => setPps((value) => Math.max(48, value / 1.5))} className="rounded-md border border-zinc-600 px-2 py-1 text-xs text-zinc-200">
+            Alejar
+          </button>
+          <button type="button" onClick={() => setPps((value) => Math.min(640, value * 1.5))} className="rounded-md border border-zinc-600 px-2 py-1 text-xs text-zinc-200">
+            Acercar
+          </button>
+          <button type="button" onClick={splitAtPlayhead} className="rounded-md border border-zinc-600 px-2 py-1 text-xs text-zinc-200">
+            Partir
+          </button>
+        </div>
       </div>
       <div className="overflow-x-auto rounded-md bg-zinc-950" onClick={(event) => {
         const rect = event.currentTarget.getBoundingClientRect();
@@ -589,7 +616,9 @@ function WordLane({
               style={{ left: cue.start * pps, width: Math.max(16, (cue.end - cue.start) * pps) }}
             >
               <button type="button" className="h-full w-2 cursor-ew-resize" onPointerDown={(event) => drag(index, "start", event)} onClick={(event) => event.stopPropagation()} />
-              <span className="min-w-0 flex-1 truncate">{cue.text}</span>
+              <span className="min-w-0 flex-1 cursor-grab truncate" onPointerDown={(event) => shift(index, event)}>
+                {cue.text}
+              </span>
               <button type="button" className="h-full w-2 cursor-ew-resize" onPointerDown={(event) => drag(index, "end", event)} onClick={(event) => event.stopPropagation()} />
             </div>
           ))}

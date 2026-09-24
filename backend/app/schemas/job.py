@@ -72,6 +72,7 @@ class CaptionStyle(BaseModel):
     size: Literal["sm", "md", "lg"] = "md"
     track: Literal["es", "en", "both"] = "both"
     mode: Literal["auto", "review"] = "auto"
+    caption_preview: bool = False
 
 
 class LogLine(BaseModel):

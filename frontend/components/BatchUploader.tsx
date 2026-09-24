@@ -60,6 +60,7 @@ type BatchJob = {
     position: string;
     size: string;
     track: string;
+    caption_preview?: boolean;
   };
   items: VideoItem[];
 };

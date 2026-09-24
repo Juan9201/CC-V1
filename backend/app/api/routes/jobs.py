@@ -157,6 +157,7 @@ class ReviewBody(BaseModel):
     highlight_color: str | None = None
     position: str | None = None
     size: str | None = None
+    caption_preview: bool | None = None
 
 
 @router.get("/fonts/{font_id}")
@@ -203,6 +204,7 @@ async def save_review(job_id: str, file_id: str, body: ReviewBody) -> BatchJob:
             "highlight_color": body.highlight_color,
             "position": body.position,
             "size": body.size,
+            "caption_preview": body.caption_preview,
         }.items()
         if value is not None
     }
