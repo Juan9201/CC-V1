@@ -6,7 +6,7 @@ from pathlib import Path
 
 import ffmpeg
 
-from app.schemas.job import CaptionStyle
+from app.schemas.job import CaptionStyle, WordTick
 from app.services.caption_style import resolve_font
 from app.services.ffmpeg_silence import (
     ffmpeg_executable,
@@ -21,7 +21,14 @@ _SIZE_PX = {"sm": 36, "md": 52, "lg": 68}
 _MAX_FPS = 30
 
 
-def burn_srt(video: Path, subtitles: Path, dest: Path, style: CaptionStyle, work_dir: Path) -> None:
+def burn_srt(
+    video: Path,
+    subtitles: Path,
+    dest: Path,
+    style: CaptionStyle,
+    work_dir: Path,
+    words: list[WordTick] | None = None,
+) -> None:
     """
     PROPÓSITO: Incrustar un SRT con la plantilla GSAP elegida para el lote.
     CONEXIONES: Playwright captura la franja. FFmpeg la superpone con h264_nvenc y copia el audio.
@@ -29,10 +36,72 @@ def burn_srt(video: Path, subtitles: Path, dest: Path, style: CaptionStyle, work
     cues = parse_srt(subtitles.read_text(encoding="utf-8"))
     if not cues:
         raise RuntimeError("El SRT no tiene frases para animar")
-    _burn(video, cues, dest, style, work_dir)
+    _burn(video, cues, dest, style, work_dir, words or [])
 
 
-def _burn(video: Path, cues: list[Cue], dest: Path, style: CaptionStyle, work_dir: Path) -> None:
+def burn_bilingual(
+    video: Path,
+    subtitles: Path,
+    dest: Path,
+    style: CaptionStyle,
+    work_dir: Path,
+    words: list[WordTick],
+) -> None:
+    """
+    PROPÓSITO: Quemar el ejemplo en inglés arriba y la explicación en español abajo.
+    CONEXIONES: Dos franjas sobre el mismo video. Los tiempos siguen siendo los del SRT.
+    """
+    cues = parse_srt(subtitles.read_text(encoding="utf-8"))
+    if not cues:
+        raise RuntimeError("El SRT no tiene frases para animar")
+    english = [cue for cue in cues if _cue_lang(cue, words) == "en"]
+    spanish = [cue for cue in cues if _cue_lang(cue, words) != "en"]
+    if not english or not spanish:
+        _burn(video, cues, dest, style, work_dir, words)
+        return
+    width, height = _video_size(video)
+    duration = probe_durations(video).get("video") or probe_durations(video)["format"]
+    font_px = max(18, round(_SIZE_PX[style.size] * (height / 1080)))
+    strip_h = _strip_height(height, font_px)
+    en_overlay = _render_overlay(video, english, style, work_dir / "en", words)
+    es_overlay = _render_overlay(video, spanish, style, work_dir / "es", words)
+    y_es = _overlay_y(style.position, height, strip_h)
+    y_en = max(0, y_es - strip_h - 8)
+    _composite_two(video, en_overlay, es_overlay, dest, y_en, y_es, duration)
+    en_overlay.unlink(missing_ok=True)
+    es_overlay.unlink(missing_ok=True)
+
+
+def _cue_lang(cue: Cue, words: list[WordTick]) -> str:
+    inside = [word.lang for word in words if word.lang and word.end > cue.start and word.start < cue.end]
+    if not inside:
+        return ""
+    return max(set(inside), key=inside.count)
+
+
+def _burn(
+    video: Path,
+    cues: list[Cue],
+    dest: Path,
+    style: CaptionStyle,
+    work_dir: Path,
+    words: list[WordTick],
+) -> None:
+    overlay = _render_overlay(video, cues, style, work_dir, words)
+    width, height = _video_size(video)
+    font_px = max(18, round(_SIZE_PX[style.size] * (height / 1080)))
+    duration = probe_durations(video).get("video") or probe_durations(video)["format"]
+    _composite(video, overlay, dest, _overlay_y(style.position, height, _strip_height(height, font_px)), duration)
+    overlay.unlink(missing_ok=True)
+
+
+def _render_overlay(
+    video: Path,
+    cues: list[Cue],
+    style: CaptionStyle,
+    work_dir: Path,
+    words: list[WordTick],
+) -> Path:
     width, height = _video_size(video)
     fps_num, fps_den = _overlay_rate(*video_frame_rate(video))
     frame_dt = fps_den / fps_num
@@ -79,7 +148,7 @@ def _burn(video: Path, cues: list[Cue], dest: Path, style: CaptionStyle, work_di
             for cue_index, (start, end, text) in enumerate(placed):
                 if start > cursor + 1e-4:
                     timeline.append((blank, start - cursor))
-                spec, samples = _cue_plan(style.preset, text, end - start, frame_dt, font_px, style)
+                spec, samples = _cue_plan(style.preset, text, end - start, frame_dt, font_px, style, words, start)
                 page.evaluate("(spec) => window.loadCue(spec)", spec)
                 for sample_index, (seek, span) in enumerate(samples):
                     page.evaluate("(time) => window.seek(time)", seek)
@@ -95,9 +164,8 @@ def _burn(video: Path, cues: list[Cue], dest: Path, style: CaptionStyle, work_di
         timeline.append((blank, duration - cursor))
     overlay = work_dir / "overlay.mov"
     _encode_overlay(timeline, overlay, frames)
-    _composite(video, overlay, dest, _overlay_y(style.position, height, strip_h), duration)
-    overlay.unlink(missing_ok=True)
     shutil.rmtree(frames, ignore_errors=True)
+    return overlay
 
 
 def _video_size(path: Path) -> tuple[int, int]:
@@ -151,6 +219,33 @@ def _place_cues(cues: list[Cue], duration: float) -> list[tuple[float, float, st
     return placed
 
 
+def _heard_marks(
+    tokens: list[str],
+    duration: float,
+    intro: float,
+    cue_start: float,
+    spoken: list[WordTick],
+) -> list[dict[str, float]]:
+    """El resalte dura lo que dura la palabra oída, no una rebanada igual del cue."""
+    cue_end = cue_start + duration
+    inside = [word for word in spoken if word.end > cue_start + 0.02 and word.start < cue_end - 0.02]
+    if not tokens:
+        return []
+    if not inside or abs(len(inside) - len(tokens)) > max(1, len(tokens) // 3):
+        each = duration / len(tokens)
+        return [
+            {"start": intro + index * each, "fade": min(0.08, each * 0.3), "stay": max(0.04, each * 0.7)}
+            for index in range(len(tokens))
+        ]
+    marks: list[dict[str, float]] = []
+    for word in inside[: len(tokens)]:
+        local = max(0.0, word.start - cue_start)
+        stay = max(0.04, min(word.end, cue_end) - max(word.start, cue_start))
+        fade = min(0.08, stay * 0.25)
+        marks.append({"start": local, "fade": fade, "stay": max(0.02, stay - fade)})
+    return marks
+
+
 def _cue_plan(
     preset: str,
     text: str,
@@ -158,23 +253,15 @@ def _cue_plan(
     frame_dt: float,
     font_px: int,
     style: CaptionStyle,
+    spoken: list[WordTick] | None = None,
+    cue_start: float = 0.0,
 ) -> tuple[dict[str, object], list[tuple[float, float]]]:
     intro, outro = _motion_spans(duration, frame_dt)
-    words = text.split() or [text]
+    tokens = text.split() or [text]
     marks: list[dict[str, float]] = []
     type_window = intro
     if preset == "highlight":
-        middle = max(frame_dt, duration - intro - outro)
-        each = middle / len(words)
-        for index in range(len(words)):
-            fade = min(0.12, each * 0.35)
-            marks.append(
-                {
-                    "start": intro + index * each,
-                    "fade": fade,
-                    "stay": max(0.0, each - (fade * 2)),
-                }
-            )
+        marks = _heard_marks(tokens, duration, intro, cue_start, spoken or [])
     elif preset == "typewriter":
         type_window = max(intro, (duration - outro) * 0.45)
 
@@ -243,10 +330,8 @@ def _highlight_samples(
     marks: list[dict[str, float]],
 ) -> list[tuple[float, float]]:
     samples = _window_samples(intro, frame_dt, intro, 0.0) if intro > 0 else []
-    middle = max(0.0, duration - intro - outro)
-    each = middle / max(len(marks), 1)
     for mark in marks:
-        samples.append((mark["start"] + mark["fade"], each))
+        samples.append((mark["start"] + mark["fade"], max(frame_dt, mark["stay"])))
     if outro > 0:
         for index in range(max(1, round(outro / frame_dt))):
             samples.append((duration - outro + index * frame_dt, frame_dt))
@@ -375,3 +460,59 @@ def _composite(video: Path, overlay: Path, dest: Path, y: int, duration: float) 
                 "y el instalado expone NVENC API 13.0."
             )
         raise RuntimeError(detail or "No se pudo superponer los subtítulos")
+
+
+def _composite_two(
+    video: Path,
+    top: Path,
+    bottom: Path,
+    dest: Path,
+    y_top: int,
+    y_bottom: int,
+    duration: float,
+) -> None:
+    completed = subprocess.run(
+        [
+            ffmpeg_executable(),
+            "-y",
+            "-i",
+            str(video),
+            "-i",
+            str(top),
+            "-i",
+            str(bottom),
+            "-filter_complex",
+            (
+                f"[1:v]format=rgba[top];[2:v]format=rgba[bottom];"
+                f"[0:v][top]overlay=x=(W-w)/2:y={y_top}:format=auto:eof_action=pass[mid];"
+                f"[mid][bottom]overlay=x=(W-w)/2:y={y_bottom}:format=auto:eof_action=pass[v]"
+            ),
+            "-map",
+            "[v]",
+            "-map",
+            "0:a:0",
+            "-t",
+            f"{duration:.6f}",
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            "p4",
+            "-rc",
+            "vbr",
+            "-cq",
+            "23",
+            "-b:v",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(dest),
+        ],
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", errors="replace")[-1800:]
+        raise RuntimeError(detail or "No se pudo superponer las dos líneas")

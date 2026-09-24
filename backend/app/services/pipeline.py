@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from app.config import settings
-from app.schemas.job import CaptionStyle, CueDraft, DownloadLinks, Span
+from app.schemas.job import CaptionStyle, CueDraft, DownloadLinks, Span, WordTick
 from app.services import caption_burn, deepseek_subtitles, ffmpeg_silence, whisper_engine
 from app.services.review_gate import review_gate
 
@@ -58,9 +58,15 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
     def burn_ready() -> str | None:
         active = current_style()
         note = None
-        if want_es and srt_es.exists():
+        spoken_now = item_now().words
+        if want_es and want_en and srt_es.exists():
             try:
-                caption_burn.burn_srt(video_out, srt_es, burned_es, active, work / "burn-es")
+                caption_burn.burn_bilingual(video_out, srt_es, burned_es, active, work / "burn-es", spoken_now)
+            except Exception as exc:
+                note = f"No se pudo incrustar el subtítulo en español: {exc}"
+        elif want_es and srt_es.exists():
+            try:
+                caption_burn.burn_srt(video_out, srt_es, burned_es, active, work / "burn-es", spoken_now)
             except Exception as exc:
                 note = f"No se pudo incrustar el subtítulo en español: {exc}"
         if want_en and srt_en.exists():
@@ -118,6 +124,7 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
                     text=cue.text,
                     source=source_text,
                     suggestion=cue.text,
+                    lang=cue.lang if cue.lang in {"es", "en"} else "",
                 )
             )
         return rows
@@ -147,10 +154,15 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
         job_store.update_item(job_id, file_id, status="transcribing", detail="Alineando palabras en GPU")
         job_store.append_log(job_id, "whisper", "Extrayendo audio y transcribiendo")
         ffmpeg_silence.extract_whisper_wav(video_out, wav_path)
-        cues = whisper_engine.transcribe_spanish(wav_path)
+        cues, spoken = whisper_engine.transcribe_spanish(wav_path)
         if not cues:
             raise RuntimeError("Whisper no devolvió palabras")
-        job_store.append_log(job_id, "whisper", f"Transcripción lista: {len(cues)} frases")
+        word_ticks = [
+            WordTick(start=word.start, end=word.end, text=word.text, lang=word.lang if word.lang in {"es", "en"} else "")
+            for word in spoken
+        ]
+        job_store.update_item(job_id, file_id, words=word_ticks)
+        job_store.append_log(job_id, "whisper", f"Transcripción lista: {len(cues)} frases, {len(spoken)} palabras")
         pause(
             "review_cues",
             "Revisa el texto de Whisper antes de enviarlo a DeepSeek.",

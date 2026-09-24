@@ -20,8 +20,9 @@ type VideoItem = {
   error: string | null;
   downloads: Downloads;
   keeps: { start: number; end: number }[];
-  cues: { start: number; end: number; text: string; source: string; suggestion: string }[];
-  cues_en: { start: number; end: number; text: string; source: string; suggestion: string }[];
+  cues: { start: number; end: number; text: string; source: string; suggestion: string; lang?: string }[];
+  cues_en: { start: number; end: number; text: string; source: string; suggestion: string; lang?: string }[];
+  words?: { start: number; end: number; text: string; lang: string }[];
   review_language: string;
   recut: boolean;
   cut_revision: number;
@@ -97,6 +98,8 @@ export function BatchUploader() {
   const pollWarn = useRef("");
   const [logsWidth, setLogsWidth] = useState(384);
   const [workerWatch, setWorkerWatch] = useState<WorkerWatch>({ active: null, queued: [] });
+  const [closedConflictAt, setClosedConflictAt] = useState<number | null>(null);
+  const acting = useRef(false);
   const [supervision, setSupervision] = useState(false);
   const jobId = job?.job_id ?? null;
   const jobStatus = job?.status ?? null;
@@ -137,11 +140,15 @@ export function BatchUploader() {
 
   useEffect(() => {
     const timer = window.setInterval(async () => {
-      const response = await fetch("/api/jobs/worker");
-      if (!response.ok) {
-        return;
+      try {
+        const response = await fetch("/api/jobs/worker");
+        if (!response.ok) {
+          return;
+        }
+        setWorkerWatch((await response.json()) as WorkerWatch);
+      } catch {
+        // El API no contestó este turno. El siguiente lo vuelve a intentar.
       }
-      setWorkerWatch((await response.json()) as WorkerWatch);
     }, 1500);
     return () => window.clearInterval(timer);
   }, []);
@@ -164,7 +171,12 @@ export function BatchUploader() {
       return;
     }
     const timer = window.setInterval(async () => {
-      const response = await fetch(`/api/jobs/${jobId}`);
+      let response: Response;
+      try {
+        response = await fetch(`/api/jobs/${jobId}`);
+      } catch {
+        return;
+      }
       if (!response.ok) {
         const note = `${jobId}:${response.status}`;
         if (pollWarn.current !== note) {
@@ -239,23 +251,31 @@ export function BatchUploader() {
   const busy = submitting || (jobStatus !== null && jobStatus !== "done" && jobStatus !== "error");
   const engineLogs = [...localLogs, ...(job?.logs ?? [])].sort((left, right) => left.at - right.at);
   const killTarget = workerWatch.active ?? workerWatch.queued[0] ?? null;
-  const lastWarn = engineLogs.findLastIndex((line) => line.level === "warn");
+  const conflictIndex = engineLogs.findLastIndex((line) => line.level === "warn" && line.message.includes("lote(s) delante"));
+  const conflict = conflictIndex >= 0 ? engineLogs[conflictIndex] : null;
+  const queueActionsOpen = conflict !== null && conflict.at !== closedConflictAt;
 
   async function actWorker(action: "continue" | "kill") {
-    const target = action === "continue" ? workerWatch.active : killTarget;
-    const response = await fetch(`/api/jobs/worker/${action}`, { method: "POST" });
-    const payload = (await response.json().catch(() => null)) as { detail?: string; filename?: string } | null;
-    if (!response.ok) {
-      pushLog("error", "ui", payload?.detail ?? `No se pudo ${action}`);
+    if (!conflict || conflict.at === closedConflictAt || acting.current) {
       return;
     }
-    pushLog(
-      action === "kill" ? "warn" : "info",
-      "ui",
-      action === "kill"
-        ? `Killer elimina de la cola: ${payload?.filename ?? target?.filename ?? "el video"}`
-        : `Continue continúa: ${payload?.filename ?? target?.filename ?? "el video"}`,
-    );
+    const closedAt = conflict.at;
+    const target = action === "continue" ? workerWatch.active : killTarget;
+    acting.current = true;
+    setClosedConflictAt(closedAt);
+    try {
+      const response = await fetch(`/api/jobs/worker/${action}`, { method: "POST" });
+      const payload = (await response.json().catch(() => null)) as { detail?: string; filename?: string } | null;
+      if (!response.ok) {
+        setClosedConflictAt((current) => (current === closedAt ? null : current));
+        pushLog("error", "ui", payload?.detail ?? `No se pudo ${action}`);
+        return;
+      }
+      const filename = payload?.filename ?? target?.filename ?? "el video";
+      pushLog("info", "ui", action === "kill" ? `Killer elimina de la cola: ${filename}` : `Continue continúa: ${filename}`);
+    } finally {
+      acting.current = false;
+    }
   }
 
   useEffect(() => {
@@ -468,11 +488,11 @@ export function BatchUploader() {
         {engineLogs.length === 0 && <p className="text-zinc-600">Esperando el motor…</p>}
         {engineLogs.map((line, index) => (
           <div key={`${line.at}-${index}`}>
-            <p className={line.level === "error" ? "text-red-400" : line.level === "warn" ? "text-amber-300" : "text-zinc-300"}>
+            <p className={line.level === "error" ? "text-red-400" : line.level === "warn" && !isQueueDecision(line.message) ? "text-amber-300" : "text-zinc-300"}>
               <span className="text-zinc-600">{formatClock(line.at)}</span>{" "}
               <span className="text-emerald-500">{line.source}</span> {line.message}
             </p>
-            {index === lastWarn && (workerWatch.active || killTarget) && (
+            {queueActionsOpen && index === conflictIndex && (
               <div className="mt-2 mb-2 space-y-2 rounded-md border border-amber-400/40 bg-zinc-900 p-2 font-sans">
                 <p className="text-[11px] leading-snug text-amber-300">
                   {workerWatch.active?.reviewing
@@ -508,6 +528,10 @@ export function BatchUploader() {
     </aside>
     </div>
   );
+}
+
+function isQueueDecision(message: string) {
+  return message.startsWith("Killer elimina") || message.startsWith("Killer eliminó") || message.startsWith("Continue continúa") || message.startsWith("Continue:");
 }
 
 function formatClock(at: number) {

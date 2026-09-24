@@ -8,6 +8,42 @@ class Cue:
     start: float
     end: float
     text: str
+    lang: str = ""
+
+
+@dataclass(frozen=True)
+class SpokenWord:
+    start: float
+    end: float
+    text: str
+    lang: str = ""
+
+
+_ES = frozenset(
+    "el la los las un una unos unas de del al que y o pero si no con por para como más mas muy ya "
+    "se lo le les me te nos os su sus es son era eran está esta están estan hay ser ir ver dar hacer "
+    "decir porque cuando donde dónde esto esta estos estas ese esa eso aquí aqui allí alli también "
+    "tambien ahora bien mal poco mucho todo toda todos todas mi tu yo él ella ellos ellas nosotros "
+    "usted ustedes mañana hoy ayer ejemplo significa quiere".split()
+)
+_EN = frozenset(
+    "the a an of to and or but if not with for from as at by in on is are was were be been being "
+    "this that these those it he she they we you i my your his her our their now then there here "
+    "what when where why how can will just very more most so do does did have has had tomorrow "
+    "today yesterday example means".split()
+)
+
+
+def word_language(token: str) -> str:
+    """Marca la palabra como español o inglés para poder separarla en dos líneas."""
+    if any(ch in token.lower() for ch in "áéíóúñü¿¡"):
+        return "es"
+    cleaned = token.strip(".,;:!?¿¡\"'()[]").lower()
+    if cleaned in _ES and cleaned not in _EN:
+        return "es"
+    if cleaned in _EN and cleaned not in _ES:
+        return "en"
+    return ""
 
 
 def format_timestamp(seconds: float) -> str:
@@ -93,46 +129,54 @@ def replace_text(cues: list[Cue], texts: list[str]) -> list[Cue]:
     if len(cues) != len(texts):
         raise ValueError(f"DeepSeek devolvió {len(texts)} textos para {len(cues)} cues")
     return [
-        Cue(index=cue.index, start=cue.start, end=cue.end, text=text.strip())
+        Cue(index=cue.index, start=cue.start, end=cue.end, text=text.strip(), lang=cue.lang)
         for cue, text in zip(cues, texts, strict=True)
     ]
 
 
 def group_words(
-    words: list[tuple[float, float, str]],
-    max_chars: int = 42,
-    max_duration: float = 4.0,
+    words: list[SpokenWord],
+    max_chars: int = 84,
+    max_duration: float = 6.0,
 ) -> list[Cue]:
     """
-    PROPÓSITO: Armar cues cuyo inicio y fin son la primera y la última palabra del grupo.
-    CONEXIONES: Ninguna. Los tiempos llegan de faster-whisper sobre el WAV ya cortado.
+    PROPÓSITO: Armar cues en el borde de una frase o de un cambio de idioma.
+    CONEXIONES: Los tiempos son los de la primera y la última palabra del grupo.
     """
     cues: list[Cue] = []
-    bucket: list[tuple[float, float, str]] = []
+    bucket: list[SpokenWord] = []
 
     def flush() -> None:
         if not bucket:
             return
-        text = " ".join(token for _start, _end, token in bucket).strip()
+        text = " ".join(word.text for word in bucket).strip()
+        known = [word.lang for word in bucket if word.lang]
+        lang = max(set(known), key=known.count) if known else ""
         cues.append(
             Cue(
                 index=len(cues) + 1,
-                start=bucket[0][0],
-                end=bucket[-1][1],
+                start=bucket[0].start,
+                end=bucket[-1].end,
                 text=text,
+                lang=lang,
             )
         )
         bucket.clear()
 
-    for start, end, token in words:
-        cleaned = token.strip()
+    for word in words:
+        cleaned = word.text.strip()
         if not cleaned:
             continue
+        spoken = SpokenWord(word.start, word.end, cleaned, word.lang or word_language(cleaned))
         if bucket:
-            tentative = f"{' '.join(item[2] for item in bucket)} {cleaned}"
-            duration = end - bucket[0][0]
-            if len(tentative) > max_chars or duration > max_duration:
+            previous = next((item.lang for item in reversed(bucket) if item.lang), "")
+            tentative = f"{' '.join(item.text for item in bucket)} {cleaned}"
+            duration = spoken.end - bucket[0].start
+            language_break = bool(previous and spoken.lang and previous != spoken.lang)
+            if language_break or len(tentative) > max_chars or duration > max_duration:
                 flush()
-        bucket.append((start, end, cleaned))
+        bucket.append(spoken)
+        if cleaned[-1] in ".?!":
+            flush()
     flush()
     return cues

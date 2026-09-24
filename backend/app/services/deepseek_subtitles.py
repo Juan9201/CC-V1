@@ -34,10 +34,85 @@ def _ask_lines(client: OpenAI, system: str, user_intro: str, chunk: list[Cue]) -
         ],
     )
     raw = completion.choices[0].message.content or "{}"
-    lines = json.loads(raw).get("lines")
+    finish = completion.choices[0].finish_reason
+    # #region agent log
+    import time
+
+    sent = " ".join(cue.text for cue in chunk)
+    with open(r"c:\AI CC\debug-03e0cf.log", "a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "sessionId": "03e0cf",
+                    "runId": "pre-fix",
+                    "hypothesisId": "D",
+                    "location": "deepseek_subtitles.py:_ask_lines",
+                    "message": "deepseek cue rewrite",
+                    "data": {
+                        "sentHasDai": "DAI" in sent,
+                        "sentHasDie": "die" in sent.lower(),
+                        "sentSample": [cue.text for cue in chunk[:4]],
+                        "rawPrefix": raw[:500],
+                    },
+                    "timestamp": int(time.time() * 1000),
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+    # #endregion
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = {}
+    lines = parsed.get("lines") if isinstance(parsed, dict) else None
+    # #region agent log
+    import time as _time
+
+    with open(r"c:\AI CC\debug-03e0cf.log", "a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "sessionId": "03e0cf",
+                    "runId": "pre-fix",
+                    "hypothesisId": "A",
+                    "location": "deepseek_subtitles.py:_ask_lines",
+                    "message": "deepseek line count",
+                    "data": {
+                        "sent": len(chunk),
+                        "finish": finish,
+                        "parsedType": type(parsed).__name__,
+                        "keys": list(parsed.keys())[:8] if isinstance(parsed, dict) else None,
+                        "linesType": type(lines).__name__,
+                        "got": len(lines) if isinstance(lines, list) else None,
+                    },
+                    "timestamp": int(_time.time() * 1000),
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+    # #endregion
     if isinstance(lines, list) and len(lines) == len(chunk):
-        return [str(line) for line in lines]
+        return [_plain(line) for line in lines]
     return None
+
+
+def _plain(line: object) -> str:
+    """DeepSeek a veces devuelve {index, text} en vez de la frase. Solo se queda el texto."""
+    if isinstance(line, dict):
+        return _plain(line.get("text", ""))
+    text = str(line).strip()
+    if text.startswith("{") and "'text'" in text:
+        try:
+            import ast
+
+            parsed = ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            return text
+        if isinstance(parsed, dict) and "text" in parsed:
+            return _plain(parsed["text"])
+    return text
 
 
 def _texts_for(cues: list[Cue], system: str, user_intro: str) -> list[str]:
@@ -46,18 +121,24 @@ def _texts_for(cues: list[Cue], system: str, user_intro: str) -> list[str]:
     CONEXIONES: API https://api.deepseek.com mediante el SDK de OpenAI.
     """
     client = _client()
-    collected: list[str] = []
-    for offset in range(0, len(cues), _CHUNK):
-        chunk = cues[offset : offset + _CHUNK]
+
+    def collect(chunk: list[Cue]) -> list[str]:
+        if len(chunk) > _CHUNK:
+            merged: list[str] = []
+            for offset in range(0, len(chunk), _CHUNK):
+                merged.extend(collect(chunk[offset : offset + _CHUNK]))
+            return merged
         lines = _ask_lines(client, system, user_intro, chunk)
         if lines is None:
             lines = _ask_lines(client, system, user_intro, chunk)
-        if lines is None:
-            raise ValueError(
-                f"La respuesta de DeepSeek no conserva el número de cues ({len(chunk)} enviados)"
-            )
-        collected.extend(lines)
-    return collected
+        if lines is not None:
+            return lines
+        if len(chunk) == 1:
+            return [chunk[0].text]
+        mid = len(chunk) // 2
+        return collect(chunk[:mid]) + collect(chunk[mid:])
+
+    return collect(cues)
 
 
 def correct_spanish(cues: list[Cue]) -> list[Cue]:

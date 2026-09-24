@@ -30,12 +30,20 @@ class Span(BaseModel):
     end: float
 
 
+class WordTick(BaseModel):
+    start: float
+    end: float
+    text: str
+    lang: Literal["es", "en", ""] = ""
+
+
 class CueDraft(BaseModel):
     start: float
     end: float
     text: str
     source: str = ""
     suggestion: str = ""
+    lang: Literal["es", "en", ""] = ""
 
 
 class VideoItem(BaseModel):
@@ -48,6 +56,7 @@ class VideoItem(BaseModel):
     keeps: list[Span] = Field(default_factory=list)
     cues: list[CueDraft] = Field(default_factory=list)
     cues_en: list[CueDraft] = Field(default_factory=list)
+    words: list[WordTick] = Field(default_factory=list)
     review_language: Literal["", "es", "en"] = ""
     recut: bool = False
     cut_revision: int = 0

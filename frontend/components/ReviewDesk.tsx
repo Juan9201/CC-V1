@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
 type Span = { start: number; end: number };
-type CueDraft = { start: number; end: number; text: string; source: string; suggestion: string };
+type WordTick = { start: number; end: number; text: string; lang: "" | "es" | "en" };
+type CueDraft = { start: number; end: number; text: string; source: string; suggestion: string; lang?: "" | "es" | "en" };
 
 type Style = {
   preset: string;
@@ -25,6 +26,7 @@ type ReviewItem = {
   keeps: Span[];
   cues: CueDraft[];
   cues_en: CueDraft[];
+  words?: WordTick[];
 };
 
 type BatchJob = {
@@ -167,6 +169,14 @@ export function ReviewDesk({
     );
   }
 
+  function moveSpoken(next: CueDraft[]) {
+    const english =
+      present.current.cuesEn.length === next.length
+        ? present.current.cuesEn.map((row, index) => ({ ...row, start: next[index].start, end: next[index].end }))
+        : present.current.cuesEn;
+    applyDraft({ ...present.current, cues: next, cuesEn: english }, "word-lane", 800);
+  }
+
   function editCues(next: CueDraft[], english: boolean) {
     const key = english ? "cuesEn" : "cues";
     const previous = present.current[key];
@@ -279,8 +289,6 @@ export function ReviewDesk({
     }
   }
 
-  const current = shown.find((cue) => playhead >= cue.start && playhead < cue.end) ?? null;
-
   return (
     <div className="mt-4 space-y-4">
       <p className="text-sm text-zinc-300">{item.detail}</p>
@@ -295,10 +303,19 @@ export function ReviewDesk({
             onTimeUpdate={(event) => setPlayhead(event.currentTarget.currentTime)}
             onLoadedMetadata={(event) => setBoxHeight(event.currentTarget.clientHeight || 360)}
           />
-          {burning && current && (
-            <CaptionOverlay cue={current} time={playhead} style={style} height={boxHeight} />
+          {burning && (
+            <BilingualPreview cues={cues} words={item.words ?? []} time={playhead} style={style} height={boxHeight} />
           )}
         </div>
+      )}
+      {!cutting && (item.words?.length ?? 0) > 0 && (
+        <WordLane
+          words={item.words ?? []}
+          cues={cues}
+          playhead={playhead}
+          onSeek={seek}
+          onChange={moveSpoken}
+        />
       )}
 
       <div className="flex items-center justify-between gap-3">
@@ -397,16 +414,203 @@ export function ReviewDesk({
   );
 }
 
-function CaptionOverlay({
+function BilingualPreview({
+  cues,
+  words,
+  time,
+  style,
+  height,
+}: {
+  cues: CueDraft[];
+  words: WordTick[];
+  time: number;
+  style: Style;
+  height: number;
+}) {
+  const spanish = cues.find((cue) => cue.lang !== "en" && time >= cue.start && time < cue.end) ?? null;
+  const english = cues.find((cue) => cue.lang === "en" && time >= cue.start && time < cue.end) ?? null;
+  if (!spanish && !english) {
+    return null;
+  }
+  return (
+    <div className="pointer-events-none absolute inset-x-0 bottom-[6%] flex flex-col items-center gap-1 px-4">
+      {english && <CaptionLine cue={english} time={time} words={words} style={style} height={height} />}
+      {spanish && <CaptionLine cue={spanish} time={time} words={words} style={style} height={height} />}
+    </div>
+  );
+}
+
+function CaptionLine({
   cue,
   time,
+  words,
   style,
   height,
 }: {
   cue: CueDraft;
   time: number;
+  words: WordTick[];
   style: Style;
   height: number;
+}) {
+  const tokens = cue.text.split(/\s+/).filter(Boolean);
+  const heard = words.filter((word) => word.end > cue.start && word.start < cue.end);
+  const highlightAt = heard.findIndex((word) => time >= word.start && time < word.end);
+  const ratio = SIZE_RATIO[style.size as keyof typeof SIZE_RATIO] ?? SIZE_RATIO.md;
+  return (
+    <p
+      className="max-w-[92%] rounded-md bg-black/55 px-3 py-1 text-center font-semibold leading-tight"
+      style={{ fontFamily: "ReviewCaption, Inter, sans-serif", fontSize: Math.max(15, height * ratio * 0.72), color: style.text_color }}
+    >
+      {style.preset === "highlight"
+        ? tokens.map((token, index) => (
+            <span key={`${token}-${index}`} style={{ color: index === highlightAt ? style.highlight_color : style.text_color }}>
+              {index > 0 ? " " : ""}
+              {token}
+            </span>
+          ))
+        : cue.text}
+    </p>
+  );
+}
+
+function WordLane({
+  words,
+  cues,
+  playhead,
+  onSeek,
+  onChange,
+}: {
+  words: WordTick[];
+  cues: CueDraft[];
+  playhead: number;
+  onSeek: (seconds: number) => void;
+  onChange: (rows: CueDraft[]) => void;
+}) {
+  const pps = 64;
+  const duration = Math.max(words[words.length - 1]?.end ?? 1, ...cues.map((cue) => cue.end));
+  const width = Math.max(duration * pps, 320);
+
+  function snap(time: number, edge: "start" | "end", lang: string) {
+    const pool = words.filter((word) => !lang || !word.lang || word.lang === lang);
+    const points = pool.map((word) => (edge === "start" ? word.start : word.end));
+    if (points.length === 0) {
+      return time;
+    }
+    return points.reduce((best, point) => (Math.abs(point - time) < Math.abs(best - time) ? point : best));
+  }
+
+  function rewrite(row: CueDraft, start: number, end: number): CueDraft {
+    const lang = row.lang || "";
+    const inside = words.filter(
+      (word) => word.start >= start - 0.04 && word.end <= end + 0.04 && (!lang || !word.lang || word.lang === lang),
+    );
+    if (inside.length === 0 || end <= start) {
+      return row;
+    }
+    return {
+      ...row,
+      start: inside[0].start,
+      end: inside[inside.length - 1].end,
+      text: inside.map((word) => word.text).join(" "),
+      lang: (lang || inside.find((word) => word.lang)?.lang || "") as CueDraft["lang"],
+    };
+  }
+
+  function drag(index: number, edge: "start" | "end", event: ReactPointerEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    const row = cues[index];
+    const origin = edge === "start" ? row.start : row.end;
+    const pointer = event.clientX;
+    const move = (ev: PointerEvent) => {
+      const nextTime = snap(origin + (ev.clientX - pointer) / pps, edge, row.lang || "");
+      const start = edge === "start" ? Math.min(nextTime, row.end - 0.08) : row.start;
+      const end = edge === "end" ? Math.max(nextTime, row.start + 0.08) : row.end;
+      onChange(cues.map((item, itemIndex) => (itemIndex === index ? rewrite(row, start, end) : item)));
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+  }
+
+  function splitAtPlayhead() {
+    const index = cues.findIndex((cue) => playhead > cue.start + 0.08 && playhead < cue.end - 0.08);
+    if (index < 0) {
+      return;
+    }
+    const row = cues[index];
+    const lang = row.lang || "";
+    const inside = words.filter(
+      (word) => word.start >= row.start - 0.04 && word.end <= row.end + 0.04 && (!lang || !word.lang || word.lang === lang),
+    );
+    const cut = inside.findIndex((word) => word.start >= playhead - 0.02);
+    if (cut <= 0 || cut >= inside.length) {
+      return;
+    }
+    const pack = (group: WordTick[]): CueDraft => ({
+      ...row,
+      start: group[0].start,
+      end: group[group.length - 1].end,
+      text: group.map((word) => word.text).join(" "),
+    });
+    onChange([...cues.slice(0, index), pack(inside.slice(0, cut)), pack(inside.slice(cut)), ...cues.slice(index + 1)]);
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-zinc-500">Arrastra el borde de un cue y encaja en una palabra. Inglés arriba, español abajo.</p>
+        <button type="button" onClick={splitAtPlayhead} className="rounded-md border border-zinc-600 px-2 py-1 text-xs text-zinc-200">
+          Partir
+        </button>
+      </div>
+      <div className="overflow-x-auto rounded-md bg-zinc-950" onClick={(event) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        onSeek(Math.max(0, (event.clientX - rect.left + event.currentTarget.scrollLeft) / pps));
+      }}>
+        <div className="relative h-28" style={{ width }}>
+          <div className="absolute inset-y-0 bg-emerald-400/80" style={{ left: playhead * pps, width: 2 }} />
+          {words.map((word, index) => (
+            <span
+              key={`${word.start}-${index}`}
+              className={`absolute top-1 truncate text-[10px] ${word.lang === "en" ? "text-sky-300" : "text-zinc-400"}`}
+              style={{ left: word.start * pps, width: Math.max(12, (word.end - word.start) * pps) }}
+            >
+              {word.text}
+            </span>
+          ))}
+          {cues.map((cue, index) => (
+            <div
+              key={`${cue.start}-${index}`}
+              className={`absolute flex h-7 items-center rounded px-1 text-[10px] text-zinc-950 ${cue.lang === "en" ? "top-6 bg-sky-400" : "top-16 bg-emerald-400"}`}
+              style={{ left: cue.start * pps, width: Math.max(16, (cue.end - cue.start) * pps) }}
+            >
+              <button type="button" className="h-full w-2 cursor-ew-resize" onPointerDown={(event) => drag(index, "start", event)} onClick={(event) => event.stopPropagation()} />
+              <span className="min-w-0 flex-1 truncate">{cue.text}</span>
+              <button type="button" className="h-full w-2 cursor-ew-resize" onPointerDown={(event) => drag(index, "end", event)} onClick={(event) => event.stopPropagation()} />
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CaptionOverlay({
+  cue,
+  time,
+  style,
+  height,
+  spoken = [],
+}: {
+  cue: CueDraft;
+  time: number;
+  style: Style;
+  height: number;
+  spoken?: WordTick[];
 }) {
   const local = Math.max(0, time - cue.start);
   const duration = Math.max(0.2, cue.end - cue.start);
@@ -419,7 +623,8 @@ function CaptionOverlay({
     const count = Math.max(1, Math.ceil((Math.min(local, duration * 0.45) / (duration * 0.45)) * cue.text.length));
     visible = cue.text.slice(0, count);
   }
-  const highlightAt = words.length ? Math.min(words.length - 1, Math.floor((local / duration) * words.length)) : 0;
+  const heard = spoken.filter((word) => word.end > cue.start && word.start < cue.end);
+  const highlightAt = heard.findIndex((word) => time >= word.start && time < word.end);
   return (
     <div
       className={`pointer-events-none absolute inset-x-0 flex justify-center px-6 ${
@@ -494,13 +699,13 @@ function SpanEditor({
               )}
               <div
                 ref={active ? rowRef : undefined}
-                className="relative flex items-center gap-2 pl-7 text-sm"
+                className="relative"
                 style={{ height: item.height }}
                 onClick={(event) => {
                   if ((event.target as HTMLElement).closest("input, button")) {
                     return;
                   }
-                  onSeek(item.cutStart);
+                  onSeek(cutPoint(item));
                 }}
               >
                 {active && (
@@ -515,22 +720,33 @@ function SpanEditor({
                     <polygon points="0,0.75 11.25,8 0,15.25" fill="#34d399" />
                   </svg>
                 )}
-                <span className="relative z-10 w-6 text-emerald-400">{item.index + 1}</span>
-                <Time
-                  value={item.row.start}
-                  onChange={(start) => onChange(rows.map((row, i) => (i === item.index ? { ...row, start } : row)))}
-                />
-                <Time
-                  value={item.row.end}
-                  onChange={(end) => onChange(rows.map((row, i) => (i === item.index ? { ...row, end } : row)))}
-                />
-                <button
-                  type="button"
-                  className="relative z-10 text-zinc-500"
-                  onClick={() => onChange(rows.filter((_, i) => i !== item.index))}
-                >
-                  Quitar
-                </button>
+                <div className="absolute inset-x-0 top-1/2 z-10 flex h-9 -translate-y-1/2 items-center gap-2 pl-7 pr-1">
+                  <button
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => onSeek(cutPoint(item))}
+                    className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-sm tabular-nums ${
+                      active ? "bg-emerald-400/20 text-emerald-300 ring-1 ring-emerald-400/70" : "text-emerald-400 hover:bg-zinc-800"
+                    }`}
+                  >
+                    {item.index + 1}
+                  </button>
+                  <Time
+                    value={item.row.start}
+                    onChange={(start) => onChange(rows.map((row, i) => (i === item.index ? { ...row, start } : row)))}
+                  />
+                  <Time
+                    value={item.row.end}
+                    onChange={(end) => onChange(rows.map((row, i) => (i === item.index ? { ...row, end } : row)))}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => onChange(rows.filter((_, i) => i !== item.index))}
+                    className="inline-flex h-8 w-16 shrink-0 items-center justify-center rounded-md text-sm text-zinc-500 hover:bg-zinc-800"
+                  >
+                    Quitar
+                  </button>
+                </div>
               </div>
             </div>
           );
@@ -559,6 +775,11 @@ function layoutKeeps(rows: Span[]) {
   return { items, totalCut: cut };
 }
 
+function cutPoint(item: { cutStart: number; duration: number }) {
+  const inset = item.duration > 0 ? Math.min(0.05, item.duration / 2) : 0;
+  return item.cutStart + inset;
+}
+
 function markerAt(laid: ReturnType<typeof layoutKeeps>, playhead: number) {
   const last = laid.items.length - 1;
   for (const item of laid.items) {
@@ -583,13 +804,21 @@ function CueEditor({
     <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
       {rows.map((row, index) => (
         <div key={index} className="rounded-md border border-zinc-800 p-2">
-          <div className="flex flex-wrap items-center gap-2 text-sm">
-            <button type="button" className="text-emerald-400" onClick={() => onSeek(row.start)}>
+          <div className="flex h-9 items-center gap-2 text-sm">
+            <button
+              type="button"
+              onClick={() => onSeek(row.start)}
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-emerald-400 tabular-nums hover:bg-zinc-800"
+            >
               {index + 1}
             </button>
             <Time value={row.start} onChange={(start) => patch(rows, index, { start }, onChange)} />
             <Time value={row.end} onChange={(end) => patch(rows, index, { end }, onChange)} />
-            <button type="button" className="text-zinc-500" onClick={() => onChange(rows.filter((_, i) => i !== index))}>
+            <button
+              type="button"
+              onClick={() => onChange(rows.filter((_, i) => i !== index))}
+              className="inline-flex h-8 w-16 shrink-0 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-800"
+            >
               Quitar
             </button>
           </div>
@@ -618,7 +847,7 @@ function Time({ value, onChange }: { value: number; onChange: (value: number) =>
       step={0.1}
       value={Number(value.toFixed(2))}
       onChange={(event) => onChange(Number(event.target.value))}
-      className="w-24 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1"
+      className="h-8 w-24 shrink-0 rounded-md border border-zinc-700 bg-zinc-950 px-2"
     />
   );
 }
