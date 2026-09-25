@@ -15,6 +15,11 @@ type Style = {
   size: string;
   track: string;
   caption_preview?: boolean;
+  lang_colors?: boolean;
+  es_text_color?: string;
+  es_highlight_color?: string;
+  en_text_color?: string;
+  en_highlight_color?: string;
 };
 
 type ReviewItem = {
@@ -84,6 +89,8 @@ export function ReviewDesk({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [undoLeft, setUndoLeft] = useState(0);
+  const [cueQuery, setCueQuery] = useState("");
+  const [cueHit, setCueHit] = useState(-1);
   const snapshot = useRef(item);
   const styleSnapshot = useRef(job.style);
   const present = useRef<Draft>(cloneDraft({ keeps: item.keeps, cues: item.cues, cuesEn: item.cues_en, style: job.style }));
@@ -125,6 +132,55 @@ export function ReviewDesk({
     gesture.current = null;
     setUndoLeft(0);
   }, [stamp]);
+
+  useEffect(() => {
+    const incoming = job.style;
+    setStyle((current) =>
+      current.preset === incoming.preset &&
+      current.font === incoming.font &&
+      current.text_color === incoming.text_color &&
+      current.highlight_color === incoming.highlight_color &&
+      current.position === incoming.position &&
+      current.size === incoming.size &&
+      current.lang_colors === incoming.lang_colors &&
+      current.es_text_color === incoming.es_text_color &&
+      current.es_highlight_color === incoming.es_highlight_color &&
+      current.en_text_color === incoming.en_text_color &&
+      current.en_highlight_color === incoming.en_highlight_color
+        ? current
+        : {
+            ...current,
+            preset: incoming.preset,
+            font: incoming.font,
+            text_color: incoming.text_color,
+            highlight_color: incoming.highlight_color,
+            position: incoming.position,
+            size: incoming.size,
+            lang_colors: incoming.lang_colors,
+            es_text_color: incoming.es_text_color,
+            es_highlight_color: incoming.es_highlight_color,
+            en_text_color: incoming.en_text_color,
+            en_highlight_color: incoming.en_highlight_color,
+          },
+    );
+    present.current = {
+      ...present.current,
+      style: {
+        ...present.current.style,
+        preset: incoming.preset,
+        font: incoming.font,
+        text_color: incoming.text_color,
+        highlight_color: incoming.highlight_color,
+        position: incoming.position,
+        size: incoming.size,
+        lang_colors: incoming.lang_colors,
+        es_text_color: incoming.es_text_color,
+        es_highlight_color: incoming.es_highlight_color,
+        en_text_color: incoming.en_text_color,
+        en_highlight_color: incoming.en_highlight_color,
+      },
+    };
+  }, [job.style.preset, job.style.font, job.style.text_color, job.style.highlight_color, job.style.position, job.style.size, job.style.lang_colors, job.style.es_text_color, job.style.es_highlight_color, job.style.en_text_color, job.style.en_highlight_color]);
 
   function publish(next: Draft) {
     present.current = next;
@@ -176,6 +232,19 @@ export function ReviewDesk({
         ? present.current.cuesEn.map((row, index) => ({ ...row, start: next[index].start, end: next[index].end }))
         : present.current.cuesEn;
     applyDraft({ ...present.current, cues: next, cuesEn: english }, "word-lane", 800);
+  }
+
+  function toggleUppercase() {
+    const needle = cueQuery.trim();
+    if (!needle || cueHit < 0 || cueHit >= shown.length) {
+      return;
+    }
+    const english = (burning && previewTrack === "en" && job.style.track === "both") || editingEnglish;
+    const rows = english ? present.current.cuesEn : present.current.cues;
+    editCues(
+      rows.map((row, index) => (index === cueHit ? { ...row, text: toggleMark(row.text, needle) } : row)),
+      english,
+    );
   }
 
   function editCues(next: CueDraft[], english: boolean) {
@@ -334,25 +403,46 @@ export function ReviewDesk({
         />
       )}
 
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-xs text-zinc-500">Ctrl+Z deshace un borrado o un cambio. Se recuerdan los últimos 5.</p>
+      <div className="flex items-center gap-3">
         {!cutting && (
+          <>
+            <CueSearch
+              rows={shown}
+              query={cueQuery}
+              activeIndex={cueHit}
+              onQuery={setCueQuery}
+              onActive={setCueHit}
+              onJump={(seconds) => seek(seconds)}
+            />
+            <button
+              type="button"
+              disabled={cueHit < 0 || cueQuery.trim() === ""}
+              onClick={toggleUppercase}
+              className="shrink-0 rounded-md border border-zinc-600 px-3 py-1 text-xs text-zinc-200 disabled:opacity-40"
+            >
+              Cambiar a mayúsculas
+            </button>
+          </>
+        )}
+        <div className="ml-auto flex items-center gap-2">
+          {!cutting && (
+            <button
+              type="button"
+              onClick={() => editStyle({ caption_preview: !style.caption_preview })}
+              className={`rounded-md border px-3 py-1 text-xs ${style.caption_preview ? "border-emerald-500 text-emerald-300" : "border-zinc-600 text-zinc-300"}`}
+            >
+              {style.caption_preview ? "Letrero visible" : "Letrero oculto"}
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => editStyle({ caption_preview: !style.caption_preview })}
-            className={`rounded-md border px-3 py-1 text-xs ${style.caption_preview ? "border-emerald-500 text-emerald-300" : "border-zinc-600 text-zinc-300"}`}
+            disabled={undoLeft === 0 || busy}
+            onClick={() => undoRef.current()}
+            className="rounded-md border border-zinc-600 px-3 py-1 text-xs text-zinc-200 disabled:opacity-40"
           >
-            {style.caption_preview ? "Letrero visible" : "Letrero oculto"}
+            Deshacer{undoLeft > 0 ? ` ${undoLeft}` : ""}
           </button>
-        )}
-        <button
-          type="button"
-          disabled={undoLeft === 0 || busy}
-          onClick={() => undoRef.current()}
-          className="rounded-md border border-zinc-600 px-3 py-1 text-xs text-zinc-200 disabled:opacity-40"
-        >
-          Deshacer{undoLeft > 0 ? ` ${undoLeft}` : ""}
-        </button>
+        </div>
       </div>
 
       {cutting ? (
@@ -366,6 +456,9 @@ export function ReviewDesk({
       ) : (
         <CueEditor
           rows={shown}
+          query={cueQuery}
+          playhead={playhead}
+          activeIndex={cueHit}
           onChange={(next) => editCues(next, (burning && previewTrack === "en" && job.style.track === "both") || editingEnglish)}
           onSeek={seek}
         />
@@ -486,6 +579,10 @@ function CaptionLine({
   const pop = Math.min(1, local / Math.max(intro, 0.04));
   const heard = words.filter((word) => word.end > cue.start && word.start < cue.end);
   const highlightAt = heard.findIndex((word) => time >= word.start && time < word.end);
+  const splitColors = style.preset === "highlight" && style.lang_colors;
+  const englishCue = cue.lang === "en";
+  const baseColor = splitColors ? (englishCue ? style.en_text_color ?? "#38bdf8" : style.es_text_color ?? style.text_color) : style.text_color;
+  const heardColor = splitColors ? (englishCue ? style.en_highlight_color ?? "#e0f2fe" : style.es_highlight_color ?? style.highlight_color) : style.highlight_color;
   const ratio = SIZE_RATIO[style.size as keyof typeof SIZE_RATIO] ?? SIZE_RATIO.md;
   const typed =
     style.preset === "typewriter"
@@ -501,13 +598,13 @@ function CaptionLine({
       style={{
         fontFamily: "ReviewCaption, Inter, sans-serif",
         fontSize: Math.max(15, height * ratio * 0.72),
-        color: style.text_color,
+        color: baseColor,
         ...motion,
       }}
     >
       {style.preset === "highlight"
         ? tokens.map((token, index) => (
-            <span key={`${token}-${index}`} style={{ color: index === highlightAt ? style.highlight_color : style.text_color }}>
+            <span key={`${token}-${index}`} style={{ color: index === highlightAt ? heardColor : baseColor }}>
               {index > 0 ? " " : ""}
               {token}
             </span>
@@ -519,8 +616,19 @@ function CaptionLine({
 
 function presentWords(text: string) {
   let open = false;
-  return text.split(/\s+/).filter(Boolean).map((token) => {
+  const out: string[] = [];
+  for (const token of text.split(/\s+/).filter(Boolean)) {
+    if (/^[,.]+$/.test(token) && out.length > 0) {
+      out[out.length - 1] += token;
+      continue;
+    }
     let word = token;
+    let tail = "";
+    const glued = word.match(/^(.*?)([,.]+)$/);
+    if (glued?.[1]) {
+      word = glued[1];
+      tail = glued[2];
+    }
     let upper = open;
     if (word.startsWith("*")) {
       upper = true;
@@ -532,8 +640,9 @@ function presentWords(text: string) {
       open = false;
       word = word.replace(/\*+$/, "");
     }
-    return upper ? word.toLocaleUpperCase("es-ES") : word;
-  });
+    out.push((upper ? word.toLocaleUpperCase("es-ES") : word) + tail);
+  }
+  return out;
 }
 
 function WordLane({
@@ -551,6 +660,7 @@ function WordLane({
 }) {
   const frame = 1 / 30;
   const [pps, setPps] = useState(160);
+  const laneRef = useRef<HTMLDivElement>(null);
   const duration = Math.max(words[words.length - 1]?.end ?? 1, ...cues.map((cue) => cue.end));
   const width = Math.max(duration * pps, 320);
 
@@ -610,6 +720,13 @@ function WordLane({
     window.addEventListener("pointerup", stop);
   }
 
+  useEffect(() => {
+    const lane = laneRef.current;
+    if (lane) {
+      lane.scrollLeft = Math.max(0, playhead * pps - lane.clientWidth / 2);
+    }
+  }, [playhead, pps]);
+
   function splitAtPlayhead() {
     const cut = quantize(playhead);
     const index = cues.findIndex((cue) => cut > cue.start + frame && cut < cue.end - frame);
@@ -645,7 +762,10 @@ function WordLane({
           </button>
         </div>
       </div>
-      <div className="overflow-x-auto rounded-md bg-zinc-950" onClick={(event) => {
+      <div
+        ref={laneRef}
+        className="overflow-x-auto rounded-md bg-zinc-950"
+        onClick={(event) => {
         const rect = event.currentTarget.getBoundingClientRect();
         onSeek(Math.max(0, (event.clientX - rect.left + event.currentTarget.scrollLeft) / pps));
       }}>
@@ -663,7 +783,7 @@ function WordLane({
           {cues.map((cue, index) => (
             <div
               key={`${cue.start}-${index}`}
-              className={`absolute flex h-7 items-center rounded px-1 text-[10px] text-zinc-950 ${cue.lang === "en" ? "top-6 bg-sky-400" : "top-16 bg-emerald-400"}`}
+              className={`absolute flex h-7 items-center rounded px-1 text-[10px] text-zinc-950 ${cue.lang === "en" ? "top-6 bg-sky-400" : "top-16 bg-emerald-400"} ${playhead >= cue.start && playhead < cue.end ? "ring-2 ring-white" : ""}`}
               style={{ left: cue.start * pps, width: Math.max(16, (cue.end - cue.start) * pps) }}
             >
               <button type="button" className="h-full w-2 cursor-ew-resize" onPointerDown={(event) => drag(index, "start", event)} onClick={(event) => event.stopPropagation()} />
@@ -871,19 +991,125 @@ function markerAt(laid: ReturnType<typeof layoutKeeps>, playhead: number) {
   return { index: 0 };
 }
 
+function toggleMark(text: string, needle: string) {
+  const source = needle.trim();
+  if (!source) {
+    return text;
+  }
+  const escaped = source.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const wrapped = new RegExp(`\\*(${escaped})\\*(?:\\s+([,.]+))?`, "i");
+  if (wrapped.test(text)) {
+    return text.replace(wrapped, (_all, found: string, punct?: string) => (punct ? `${found}${punct}` : found));
+  }
+  const bare = new RegExp(`(${escaped})([,.]+)?`, "i");
+  if (!bare.test(text)) {
+    return text;
+  }
+  return text.replace(bare, (_all, found: string, punct: string | undefined, offset: number, whole: string) => {
+    const prev = offset > 0 ? whole[offset - 1] : "";
+    const lead = prev === "," || prev === "." ? " " : "";
+    return punct ? `${lead}*${found}* ${punct}` : `${lead}*${found}*`;
+  });
+}
+
+function cuePlain(text: string) {
+  return text.replaceAll("*", "").toLocaleLowerCase("es-ES");
+}
+
+function CueSearch({
+  rows,
+  query,
+  activeIndex,
+  onQuery,
+  onActive,
+  onJump,
+}: {
+  rows: CueDraft[];
+  query: string;
+  activeIndex: number;
+  onQuery: (value: string) => void;
+  onActive: (index: number) => void;
+  onJump: (seconds: number) => void;
+}) {
+  const needle = query.trim().toLocaleLowerCase("es-ES");
+  const hits = needle ? rows.flatMap((row, index) => (cuePlain(row.text).includes(needle) ? [index] : [])) : [];
+
+  useEffect(() => {
+    const index = hits[0] ?? -1;
+    onActive(index);
+    if (index >= 0) {
+      onJump(rows[index].start);
+    }
+  }, [needle]);
+
+  function jump(step: number) {
+    if (hits.length === 0) {
+      return;
+    }
+    const place = hits.indexOf(activeIndex);
+    const next = place < 0 ? hits[step < 0 ? hits.length - 1 : 0] : hits[(place + step + hits.length) % hits.length];
+    onActive(next);
+    onJump(rows[next].start);
+  }
+
+  return (
+    <input
+      type="search"
+      value={query}
+      placeholder="Buscar en los subtítulos"
+      onChange={(event) => onQuery(event.target.value)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          jump(event.shiftKey ? -1 : 1);
+        }
+      }}
+      className="h-8 min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100"
+      title={needle ? `${hits.length} frase(s). Enter sigue, Shift+Enter vuelve.` : "Solo busca dentro de los subtítulos"}
+    />
+  );
+}
+
 function CueEditor({
   rows,
+  query,
+  playhead,
+  activeIndex,
   onChange,
   onSeek,
 }: {
   rows: CueDraft[];
+  query: string;
+  playhead: number;
+  activeIndex: number;
   onChange: (rows: CueDraft[]) => void;
   onSeek: (seconds: number) => void;
 }) {
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const lastEditor = useRef("");
+
+  useEffect(() => {
+    const live = rows.findIndex((row) => playhead >= row.start && playhead < row.end);
+    if (lastEditor.current === String(live)) {
+      return;
+    }
+    lastEditor.current = String(live);
+    const scroller = scrollerRef.current;
+    const row = scroller?.querySelector<HTMLElement>(`[data-cue-index="${live}"]`);
+    if (scroller && row && live >= 0) {
+      const top = row.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+      scroller.scrollTop = Math.max(0, top - scroller.clientHeight / 3);
+    }
+  }, [playhead, rows]);
+
   return (
-    <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
+    <div ref={scrollerRef} className="max-h-80 space-y-2 overflow-y-auto pr-1">
       {rows.map((row, index) => (
-        <div key={index} className="rounded-md border border-zinc-800 p-2">
+        <div
+          key={index}
+          data-cue-index={index}
+          className={`rounded-md border p-2 ${playhead >= row.start && playhead < row.end ? "border-emerald-400 bg-emerald-400/10" : index === activeIndex ? "border-sky-400" : "border-zinc-800"}`}
+        >
           <div className="flex h-9 items-center gap-2 text-sm">
             <button
               type="button"

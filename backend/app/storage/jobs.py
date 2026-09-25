@@ -2,7 +2,7 @@ import time
 from threading import Lock
 from uuid import uuid4
 
-from app.schemas.job import BatchJob, CaptionStyle, DownloadLinks, LogLine, VideoItem
+from app.schemas.job import BatchJob, CaptionStyle, DownloadLinks, JobProgress, LogLine, ProgressStep, VideoItem
 
 _ACTIVE = {
     "cutting",
@@ -63,6 +63,20 @@ class JobStore:
             job.logs.append(line)
             if len(job.logs) > 400:
                 del job.logs[:-400]
+
+    def set_progress(self, job_id: str, steps: list[tuple[str, str]], key: str, ratio: float, label: str) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            keys = [step[0] for step in steps]
+            index = keys.index(key) if key in keys else 0
+            job.progress = JobProgress(
+                steps=[ProgressStep(key=name, label=title) for name, title in steps],
+                index=index,
+                sub_ratio=max(0.0, min(1.0, ratio)),
+                sub_label=label,
+            )
 
     def update_style(self, job_id: str, **changes: object) -> None:
         with self._lock:

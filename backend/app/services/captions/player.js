@@ -1,7 +1,18 @@
 function presentWords(text) {
   let open = false;
-  return text.split(/\s+/).filter(Boolean).map((token) => {
+  const out = [];
+  for (const token of text.split(/\s+/).filter(Boolean)) {
+    if (/^[,.]+$/.test(token) && out.length > 0) {
+      out[out.length - 1] += token;
+      continue;
+    }
     let word = token;
+    let tail = "";
+    const glued = word.match(/^(.*?)([,.]+)$/);
+    if (glued && glued[1]) {
+      word = glued[1];
+      tail = glued[2];
+    }
     let upper = open;
     if (word.startsWith("*")) {
       upper = true;
@@ -13,8 +24,9 @@ function presentWords(text) {
       open = false;
       word = word.replace(/\*+$/, "");
     }
-    return upper ? word.toLocaleUpperCase("es-ES") : word;
-  });
+    out.push((upper ? word.toLocaleUpperCase("es-ES") : word) + tail);
+  }
+  return out;
 }
 
 function buildCue(spec) {

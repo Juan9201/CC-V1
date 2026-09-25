@@ -139,7 +139,12 @@ def speech_ranges(
     return keeps or [(0.0, duration)]
 
 
-def _run(stream: ffmpeg.nodes.OutputStream, extra_args: list[str] | None = None) -> None:
+def _run(
+    stream: ffmpeg.nodes.OutputStream,
+    extra_args: list[str] | None = None,
+    on_progress=None,
+    duration: float = 0,
+) -> None:
     """Ejecuta el grafo. extra_args se insertan delante del archivo de salida."""
     argv = ffmpeg.compile(stream, cmd=ffmpeg_executable(), overwrite_output=True)
     if extra_args:
@@ -148,7 +153,24 @@ def _run(stream: ffmpeg.nodes.OutputStream, extra_args: list[str] | None = None)
             argv = argv[:-2] + extra_args + argv[-2:]
         else:
             argv = argv[:-1] + extra_args + argv[-1:]
-    completed = subprocess.run(argv, capture_output=True)
+    if on_progress is None or duration <= 0:
+        completed = subprocess.run(argv, capture_output=True)
+    else:
+        proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        clock = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
+        err = bytearray()
+        assert proc.stderr is not None
+        while True:
+            block = proc.stderr.read(256)
+            if not block:
+                break
+            err.extend(block)
+            match = clock.search(err.decode("utf-8", errors="replace")[-80:])
+            if match:
+                seen = int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
+                on_progress(min(1.0, seen / duration))
+        code = proc.wait()
+        completed = subprocess.CompletedProcess(argv, code, b"", bytes(err))
     if completed.returncode != 0:
         detail = completed.stderr.decode("utf-8", errors="replace")[-1800:]
         if "minimum required Nvidia driver" in detail:
@@ -166,6 +188,7 @@ def render_without_silence(
     *,
     vcodec: str = "h264_nvenc",
     keeps: list[tuple[float, float]] | None = None,
+    on_progress=None,
 ) -> dict[str, float]:
     """
     PROPÓSITO: Quitar silencios en un solo encode NVENC para conservar una línea de tiempo.
@@ -230,7 +253,7 @@ def render_without_silence(
         pix_fmt="yuv420p",
         **encode_options,
     )
-    _run(stream, ["-map", "[v]", "-map", "[ap]", "-t", f"{target:.6f}"])
+    _run(stream, ["-map", "[v]", "-map", "[ap]", "-t", f"{target:.6f}"], on_progress, target)
     return probe_durations(dest)
 
 

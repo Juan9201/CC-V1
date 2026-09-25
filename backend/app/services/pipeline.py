@@ -39,6 +39,15 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
     review = style.mode == "review"
     want_es = style.track in {"es", "both"}
     want_en = style.track in {"en", "both"}
+    steps: list[tuple[str, str]] = [("cut", "Corte de silencios"), ("whisper", "Whisper")]
+    if want_es:
+        steps.append(("es", "Español"))
+    if want_en:
+        steps.append(("en", "Inglés"))
+    steps.append(("burn", "Quemado"))
+
+    def report(key: str, ratio: float, label: str) -> None:
+        job_store.set_progress(job_id, steps, key, ratio, label)
 
     def current_style() -> CaptionStyle:
         fresh = job_store.get(job_id)
@@ -136,7 +145,15 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
         while True:
             job_store.update_item(job_id, file_id, status="cutting", detail="Quitando silencios con NVENC")
             job_store.append_log(job_id, "ffmpeg", "Cortando silencios con NVENC")
-            ffmpeg_silence.render_without_silence(source, video_out, work, keeps=keeps)
+            report("cut", 0, "Cortando silencios")
+            ffmpeg_silence.render_without_silence(
+                source,
+                video_out,
+                work,
+                keeps=keeps,
+                on_progress=lambda ratio: report("cut", ratio, "Cortando silencios"),
+            )
+            report("cut", 1, "Corte listo")
             saved = json.loads((work / "keeps.json").read_text(encoding="utf-8"))
             spans = [Span(start=row["start"], end=row["end"]) for row in saved]
             revision = item_now().cut_revision + 1
@@ -153,8 +170,14 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
 
         job_store.update_item(job_id, file_id, status="transcribing", detail="Alineando palabras en GPU")
         job_store.append_log(job_id, "whisper", "Extrayendo audio y transcribiendo")
+        report("whisper", 0, "Extrayendo audio")
         ffmpeg_silence.extract_whisper_wav(video_out, wav_path)
-        cues, spoken = whisper_engine.transcribe_spanish(wav_path)
+        report("whisper", 0.08, "Transcribiendo")
+        cues, spoken = whisper_engine.transcribe_spanish(
+            wav_path,
+            on_progress=lambda ratio: report("whisper", 0.08 + ratio * 0.92, "Transcribiendo"),
+        )
+        report("whisper", 1, "Transcripción lista")
         if not cues:
             raise RuntimeError("Whisper no devolvió palabras")
         word_ticks = [
@@ -180,7 +203,11 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
             detail = "Corrigiendo y traduciendo subtítulos"
         job_store.update_item(job_id, file_id, status="refining", detail=detail)
         job_store.append_log(job_id, "deepseek", detail)
-        spanish = deepseek_subtitles.correct_spanish(cues)
+        report("es" if want_es else "en", 0, detail)
+        spanish = deepseek_subtitles.correct_spanish(
+            cues,
+            on_progress=lambda ratio: report("es" if want_es else "en", ratio, detail),
+        )
         job_store.append_log(job_id, "deepseek", f"Español listo: {len(spanish)} frases")
         if review and want_es:
             pause(
@@ -195,7 +222,11 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
         english: list[Cue] = []
         if want_en:
             job_store.append_log(job_id, "deepseek", "Traduciendo al inglés")
-            english = deepseek_subtitles.translate_english(spanish)
+            report("en", 0, "Traduciendo al inglés")
+            english = deepseek_subtitles.translate_english(
+                spanish,
+                on_progress=lambda ratio: report("en", ratio, "Traduciendo al inglés"),
+            )
             job_store.append_log(job_id, "deepseek", f"Inglés listo: {len(english)} frases")
             if review:
                 drafts = paired(spanish, english)
@@ -238,7 +269,9 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
 
         job_store.update_item(job_id, file_id, status="refining", detail="Incrustando subtítulos animados")
         job_store.append_log(job_id, "ffmpeg", "Quemando subtítulos animados")
+        report("burn", 0, "Quemando subtítulos")
         burn_note = burn_ready()
+        report("burn", 1, "Listo para descargar")
         job_store.append_log(job_id, "ffmpeg", burn_note or "Quemado listo", "warn" if burn_note else "info")
         job_store.set_downloads(job_id, file_id, links(item_now().cut_revision))
         if burn_note:

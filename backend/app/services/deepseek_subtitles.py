@@ -34,65 +34,11 @@ def _ask_lines(client: OpenAI, system: str, user_intro: str, chunk: list[Cue]) -
         ],
     )
     raw = completion.choices[0].message.content or "{}"
-    finish = completion.choices[0].finish_reason
-    # #region agent log
-    import time
-
-    sent = " ".join(cue.text for cue in chunk)
-    with open(r"c:\AI CC\debug-03e0cf.log", "a", encoding="utf-8") as handle:
-        handle.write(
-            json.dumps(
-                {
-                    "sessionId": "03e0cf",
-                    "runId": "pre-fix",
-                    "hypothesisId": "D",
-                    "location": "deepseek_subtitles.py:_ask_lines",
-                    "message": "deepseek cue rewrite",
-                    "data": {
-                        "sentHasDai": "DAI" in sent,
-                        "sentHasDie": "die" in sent.lower(),
-                        "sentSample": [cue.text for cue in chunk[:4]],
-                        "rawPrefix": raw[:500],
-                    },
-                    "timestamp": int(time.time() * 1000),
-                },
-                ensure_ascii=False,
-            )
-            + "\n"
-        )
-    # #endregion
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
         parsed = {}
     lines = parsed.get("lines") if isinstance(parsed, dict) else None
-    # #region agent log
-    import time as _time
-
-    with open(r"c:\AI CC\debug-03e0cf.log", "a", encoding="utf-8") as handle:
-        handle.write(
-            json.dumps(
-                {
-                    "sessionId": "03e0cf",
-                    "runId": "pre-fix",
-                    "hypothesisId": "A",
-                    "location": "deepseek_subtitles.py:_ask_lines",
-                    "message": "deepseek line count",
-                    "data": {
-                        "sent": len(chunk),
-                        "finish": finish,
-                        "parsedType": type(parsed).__name__,
-                        "keys": list(parsed.keys())[:8] if isinstance(parsed, dict) else None,
-                        "linesType": type(lines).__name__,
-                        "got": len(lines) if isinstance(lines, list) else None,
-                    },
-                    "timestamp": int(_time.time() * 1000),
-                },
-                ensure_ascii=False,
-            )
-            + "\n"
-        )
-    # #endregion
     if isinstance(lines, list) and len(lines) == len(chunk):
         return [_plain(line) for line in lines]
     return None
@@ -115,14 +61,17 @@ def _plain(line: object) -> str:
     return text
 
 
-def _texts_for(cues: list[Cue], system: str, user_intro: str) -> list[str]:
+def _texts_for(cues: list[Cue], system: str, user_intro: str, on_progress=None) -> list[str]:
     """
     PROPÓSITO: Pedir a DeepSeek solo el texto, en el mismo orden que los cues.
     CONEXIONES: API https://api.deepseek.com mediante el SDK de OpenAI.
     """
     client = _client()
+    total = max(len(cues), 1)
+    done = 0
 
     def collect(chunk: list[Cue]) -> list[str]:
+        nonlocal done
         if len(chunk) > _CHUNK:
             merged: list[str] = []
             for offset in range(0, len(chunk), _CHUNK):
@@ -132,8 +81,14 @@ def _texts_for(cues: list[Cue], system: str, user_intro: str) -> list[str]:
         if lines is None:
             lines = _ask_lines(client, system, user_intro, chunk)
         if lines is not None:
+            done += len(chunk)
+            if on_progress is not None:
+                on_progress(min(1.0, done / total))
             return lines
         if len(chunk) == 1:
+            done += 1
+            if on_progress is not None:
+                on_progress(min(1.0, done / total))
             return [chunk[0].text]
         mid = len(chunk) // 2
         return collect(chunk[:mid]) + collect(chunk[mid:])
@@ -141,7 +96,7 @@ def _texts_for(cues: list[Cue], system: str, user_intro: str) -> list[str]:
     return collect(cues)
 
 
-def correct_spanish(cues: list[Cue]) -> list[Cue]:
+def correct_spanish(cues: list[Cue], on_progress=None) -> list[Cue]:
     """
     PROPÓSITO: Corregir cada frase en el idioma en que se dijo, sin mover timestamps.
     CONEXIONES: DeepSeek.
@@ -157,11 +112,11 @@ def correct_spanish(cues: list[Cue]) -> list[Cue]:
     )
     return replace_text(
         cues,
-        _texts_for(cues, system, "Corrige estas frases y conserva el idioma de cada una."),
+        _texts_for(cues, system, "Corrige estas frases y conserva el idioma de cada una.", on_progress),
     )
 
 
-def translate_english(cues: list[Cue]) -> list[Cue]:
+def translate_english(cues: list[Cue], on_progress=None) -> list[Cue]:
     """
     PROPÓSITO: Pasar al inglés solo lo que está en español. El inglés hablado se queda.
     CONEXIONES: DeepSeek.
@@ -180,5 +135,6 @@ def translate_english(cues: list[Cue]) -> list[Cue]:
             cues,
             system,
             "Produce the English subtitle line for each cue. Keep one line per cue.",
+            on_progress,
         ),
     )

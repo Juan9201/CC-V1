@@ -61,8 +61,19 @@ type BatchJob = {
     size: string;
     track: string;
     caption_preview?: boolean;
+    lang_colors?: boolean;
+    es_text_color?: string;
+    es_highlight_color?: string;
+    en_text_color?: string;
+    en_highlight_color?: string;
   };
   items: VideoItem[];
+  progress?: {
+    steps: { key: string; label: string }[];
+    index: number;
+    sub_ratio: number;
+    sub_label: string;
+  };
 };
 
 const LABELS: Record<string, string> = {
@@ -90,6 +101,11 @@ export function BatchUploader() {
   const [fonts, setFonts] = useState<string[]>(["Inter"]);
   const [textColor, setTextColor] = useState("#ffffff");
   const [highlightColor, setHighlightColor] = useState("#ffe14a");
+  const [langColors, setLangColors] = useState(false);
+  const [esTextColor, setEsTextColor] = useState("#ffffff");
+  const [esHighlightColor, setEsHighlightColor] = useState("#22c55e");
+  const [enTextColor, setEnTextColor] = useState("#38bdf8");
+  const [enHighlightColor, setEnHighlightColor] = useState("#e0f2fe");
   const [position, setPosition] = useState("bottom");
   const [size, setSize] = useState("md");
   const [track, setTrack] = useState("both");
@@ -101,9 +117,13 @@ export function BatchUploader() {
   const [workerWatch, setWorkerWatch] = useState<WorkerWatch>({ active: null, queued: [] });
   const [closedConflictAt, setClosedConflictAt] = useState<number | null>(null);
   const acting = useRef(false);
+  const liveStyle = useRef<Partial<BatchJob["style"]>>({});
   const [supervision, setSupervision] = useState(false);
   const jobId = job?.job_id ?? null;
   const jobStatus = job?.status ?? null;
+  const firstLogAt = job?.logs?.[0]?.at ?? null;
+  const [processClock, setProcessClock] = useState<{ id: string; start: number; end: number | null } | null>(null);
+  const clockFace = useRef<HTMLParagraphElement>(null);
 
   useLayoutEffect(() => {
     setSupervision(window.location.port === "3002");
@@ -155,6 +175,41 @@ export function BatchUploader() {
   }, []);
 
   useEffect(() => {
+    if (!jobId) {
+      return;
+    }
+    const origin = firstLogAt ?? Date.now();
+    setProcessClock((current) => {
+      if (current?.id === jobId) {
+        if ((jobStatus === "done" || jobStatus === "error") && current.end === null) {
+          return { ...current, end: Date.now() };
+        }
+        return current;
+      }
+      const finished = jobStatus === "done" || jobStatus === "error";
+      return { id: jobId, start: origin, end: finished ? Date.now() : null };
+    });
+  }, [jobId, jobStatus, firstLogAt]);
+
+  useEffect(() => {
+    const face = clockFace.current;
+    if (!processClock || !face) {
+      return;
+    }
+    if (processClock.end !== null) {
+      face.textContent = formatElapsed(processClock.end - processClock.start);
+      return;
+    }
+    let frame = 0;
+    const paint = () => {
+      face.textContent = formatElapsed(Date.now() - processClock.start);
+      frame = window.requestAnimationFrame(paint);
+    };
+    frame = window.requestAnimationFrame(paint);
+    return () => window.cancelAnimationFrame(frame);
+  }, [processClock]);
+
+  useEffect(() => {
     fetch("/api/jobs/caption-options")
       .then((response) => (response.ok ? response.json() : null))
       .then((data: { fonts?: string[] } | null) => {
@@ -187,10 +242,49 @@ export function BatchUploader() {
         return;
       }
       const next = (await response.json()) as BatchJob;
+      next.style = { ...next.style, ...liveStyle.current };
       setJob(next);
     }, 1500);
     return () => window.clearInterval(timer);
   }, [jobId, jobStatus]);
+
+  function paintStyle(patch: Partial<BatchJob["style"]>) {
+    if (patch.preset) {
+      setPreset(patch.preset);
+    }
+    if (patch.font) {
+      setFont(patch.font);
+    }
+    if (patch.text_color) {
+      setTextColor(patch.text_color);
+    }
+    if (patch.highlight_color) {
+      setHighlightColor(patch.highlight_color);
+    }
+    if (patch.lang_colors !== undefined) {
+      setLangColors(patch.lang_colors);
+    }
+    if (patch.es_text_color) {
+      setEsTextColor(patch.es_text_color);
+    }
+    if (patch.es_highlight_color) {
+      setEsHighlightColor(patch.es_highlight_color);
+    }
+    if (patch.en_text_color) {
+      setEnTextColor(patch.en_text_color);
+    }
+    if (patch.en_highlight_color) {
+      setEnHighlightColor(patch.en_highlight_color);
+    }
+    if (patch.position) {
+      setPosition(patch.position);
+    }
+    if (patch.size) {
+      setSize(patch.size);
+    }
+    liveStyle.current = { ...liveStyle.current, ...patch };
+    setJob((current) => (current ? { ...current, style: { ...current.style, ...patch } } : current));
+  }
 
   function addFiles(list: FileList | File[]) {
     const incoming = Array.from(list).filter((file) => file.type.startsWith("video/"));
@@ -348,7 +442,7 @@ export function BatchUploader() {
           Plantilla
           <select
             value={preset}
-            onChange={(event) => setPreset(event.target.value)}
+            onChange={(event) => paintStyle({ preset: event.target.value })}
             className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100"
           >
             <option value="pop">Pop</option>
@@ -360,7 +454,7 @@ export function BatchUploader() {
           Fuente
           <select
             value={font}
-            onChange={(event) => setFont(event.target.value)}
+            onChange={(event) => paintStyle({ font: event.target.value })}
             className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100"
           >
             {fonts.map((name) => (
@@ -375,7 +469,7 @@ export function BatchUploader() {
           <input
             type="color"
             value={textColor}
-            onChange={(event) => setTextColor(event.target.value)}
+            onChange={(event) => paintStyle({ text_color: event.target.value })}
             className="mt-1 block h-10 w-full rounded-md border border-zinc-700 bg-zinc-950"
           />
         </label>
@@ -384,15 +478,55 @@ export function BatchUploader() {
           <input
             type="color"
             value={highlightColor}
-            onChange={(event) => setHighlightColor(event.target.value)}
+            onChange={(event) => paintStyle({ highlight_color: event.target.value })}
             className="mt-1 block h-10 w-full rounded-md border border-zinc-700 bg-zinc-950"
           />
         </label>
+        {preset === "highlight" && (
+          <div className="sm:col-span-2 rounded-lg border border-zinc-800 p-3">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm text-zinc-300">Colores por idioma en el pre-quemado</p>
+              <button
+                type="button"
+                onClick={() => paintStyle({ lang_colors: !langColors })}
+                className={`rounded-md border px-3 py-1 text-xs ${langColors ? "border-emerald-500 text-emerald-300" : "border-zinc-600 text-zinc-300"}`}
+              >
+                {langColors ? "ON" : "OFF"}
+              </button>
+            </div>
+            {langColors && (
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-md border border-zinc-800 p-3">
+                  <p className="text-sm text-emerald-300">Español</p>
+                  <label className="mt-2 block text-sm text-zinc-400">
+                    Color del texto
+                    <input type="color" value={esTextColor} onChange={(event) => paintStyle({ es_text_color: event.target.value })} className="mt-1 block h-10 w-full rounded-md border border-zinc-700 bg-zinc-950" />
+                  </label>
+                  <label className="mt-2 block text-sm text-zinc-400">
+                    Color del resalte
+                    <input type="color" value={esHighlightColor} onChange={(event) => paintStyle({ es_highlight_color: event.target.value })} className="mt-1 block h-10 w-full rounded-md border border-zinc-700 bg-zinc-950" />
+                  </label>
+                </div>
+                <div className="rounded-md border border-zinc-800 p-3">
+                  <p className="text-sm text-sky-300">Inglés</p>
+                  <label className="mt-2 block text-sm text-zinc-400">
+                    Color del texto
+                    <input type="color" value={enTextColor} onChange={(event) => paintStyle({ en_text_color: event.target.value })} className="mt-1 block h-10 w-full rounded-md border border-zinc-700 bg-zinc-950" />
+                  </label>
+                  <label className="mt-2 block text-sm text-zinc-400">
+                    Color del resalte
+                    <input type="color" value={enHighlightColor} onChange={(event) => paintStyle({ en_highlight_color: event.target.value })} className="mt-1 block h-10 w-full rounded-md border border-zinc-700 bg-zinc-950" />
+                  </label>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
         <label className="text-sm text-zinc-400">
           Posición
           <select
             value={position}
-            onChange={(event) => setPosition(event.target.value)}
+            onChange={(event) => paintStyle({ position: event.target.value })}
             className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100"
           >
             <option value="bottom">Abajo</option>
@@ -403,7 +537,7 @@ export function BatchUploader() {
           Tamaño
           <select
             value={size}
-            onChange={(event) => setSize(event.target.value)}
+            onChange={(event) => paintStyle({ size: event.target.value })}
             className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100"
           >
             <option value="sm">Pequeño</option>
@@ -526,6 +660,16 @@ export function BatchUploader() {
           </div>
         ))}
       </div>
+      {processClock && (
+        <div className="border-t border-zinc-800 px-3 py-3 font-mono">
+          <p className="text-[10px] uppercase tracking-wide text-zinc-500">Tiempo de proceso</p>
+          <p ref={clockFace} className="text-2xl text-zinc-100 tabular-nums">{formatElapsed((processClock.end ?? Date.now()) - processClock.start)}</p>
+          <p className="text-[11px] text-zinc-400">
+            {processClock.end === null ? "En curso" : jobStatus === "error" ? "Detenido" : "Listo para descargar"}
+          </p>
+          <ProgressBars progress={job?.progress} done={processClock.end !== null && jobStatus !== "error"} />
+        </div>
+      )}
     </aside>
     </div>
   );
@@ -533,6 +677,64 @@ export function BatchUploader() {
 
 function isQueueDecision(message: string) {
   return message.startsWith("Killer elimina") || message.startsWith("Killer eliminó") || message.startsWith("Continue continúa") || message.startsWith("Continue:");
+}
+
+function ProgressBars({
+  progress,
+  done,
+}: {
+  progress?: BatchJob["progress"];
+  done: boolean;
+}) {
+  const steps = progress?.steps ?? [];
+  const count = Math.max(steps.length, 1);
+  const sub = done ? 1 : Math.max(0, Math.min(1, progress?.sub_ratio ?? 0));
+  const index = done ? count : progress?.index ?? 0;
+  const overall = done ? 1 : Math.max(0, Math.min(1, (index + sub) / count));
+  const current = steps[Math.min(index, steps.length - 1)];
+  return (
+    <div className="mt-3 space-y-2 font-sans">
+      <div>
+        <div className="mb-1 flex justify-between text-[10px] uppercase tracking-wide text-zinc-500">
+          <span>Proceso general</span>
+          <span>{Math.round(overall * 100)}%</span>
+        </div>
+        <div className="h-2 overflow-hidden rounded-full bg-zinc-800">
+          <div className="h-full rounded-full bg-emerald-400" style={{ width: `${overall * 100}%` }} />
+        </div>
+        {steps.length > 0 && (
+          <p className="mt-1 text-[10px] text-zinc-500">
+            {steps.map((step, stepIndex) => (
+              <span key={step.key} className={done || stepIndex < index ? "text-emerald-500" : stepIndex === index ? "text-zinc-100" : ""}>
+                {stepIndex > 0 ? " · " : ""}
+                {step.label}
+              </span>
+            ))}
+          </p>
+        )}
+      </div>
+      <div>
+        <div className="mb-1 flex justify-between text-[10px] uppercase tracking-wide text-zinc-500">
+          <span>{done ? "Listo" : progress?.sub_label || current?.label || "Esperando"}</span>
+          <span>{Math.round(sub * 100)}%</span>
+        </div>
+        <div className="h-2 overflow-hidden rounded-full bg-zinc-800">
+          <div className="h-full rounded-full bg-sky-400" style={{ width: `${sub * 100}%` }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function formatElapsed(ms: number) {
+  const safe = Math.max(0, ms);
+  const total = Math.floor(safe / 1000);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  const millis = Math.floor(safe % 1000);
+  const clock = [hours, minutes, seconds].map((part) => String(part).padStart(2, "0")).join(":");
+  return `${clock}.${String(millis).padStart(3, "0")}`;
 }
 
 function formatClock(at: number) {

@@ -75,6 +75,18 @@ class CaptionStyle(BaseModel):
     caption_preview: bool = False
 
 
+class ProgressStep(BaseModel):
+    key: str
+    label: str
+
+
+class JobProgress(BaseModel):
+    steps: list[ProgressStep] = Field(default_factory=list)
+    index: int = 0
+    sub_ratio: float = 0
+    sub_label: str = ""
+
+
 class LogLine(BaseModel):
     at: int
     level: Literal["info", "warn", "error"] = "info"
@@ -88,3 +100,4 @@ class BatchJob(BaseModel):
     style: CaptionStyle = Field(default_factory=CaptionStyle)
     items: list[VideoItem]
     logs: list[LogLine] = Field(default_factory=list)
+    progress: JobProgress = Field(default_factory=JobProgress)

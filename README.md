@@ -10,7 +10,8 @@ flowchart LR
   c1["Capa 1 · billingualV1<br/>Plantillas animadas<br/>Fuente, color y posición"]
   c2["Capa 2 · timelineV1<br/>3001 procesa el lote<br/>3002 revisa y luego quema"]
   c3["Capa 3 · overlayUndoV1<br/>Overlay del tramo<br/>Undo, logs y Killer"]
-  c0 --> c1 --> c2 --> c3
+  c4["Capa 4 · v4<br/>Línea de palabras, letrero<br/>cronómetro y barras"]
+  c0 --> c1 --> c2 --> c3 --> c4
 ```
 
 | Capa | Qué aporta |
@@ -19,6 +20,7 @@ flowchart LR
 | 1 · `billingualV1` | Quema tres animaciones: Pop, Resalte y Máquina de escribir. Se eligen fuente, colores, posición y tamaño. El video limpio se conserva. |
 | 2 · `timelineV1` | El lote sigue solo, o se detiene para corregir el corte, el texto y la animación antes de quemar. El idioma puede ser español, inglés o ambos. El puerto 3002 abre la revisión; el 3001 procesa sin esa pantalla. Los dos usan el API 8001. |
 | 3 · `overlayUndoV1` | En el corte, el tramo que suena queda marcado con un overlay y un triángulo. Ctrl+Z deshace hasta cinco cambios, para recuperar un Quitar accidental. Los logs del motor quedan a la derecha: Continue suelta la revisión y Killer saca de la cola el video que la tiene trabada. |
+| 4 · `v4` | La revisión sigue la frase que suena: línea de palabras, letrero en el video (español abajo, inglés arriba) y recorte fotograma a fotograma. El buscador salta a la frase; `*texto*` la deja en mayúsculas. Resalte puede pintar español e inglés con colores distintos, con un ON/OFF. El cronómetro cuenta con milisegundos desde que entra el lote hasta que los archivos se pueden descargar. Debajo van dos barras: el proceso general y el subproceso activo (corte, Whisper, español, inglés y quemado). |
 
 Las notas de cada capa están en [Releases](https://github.com/Juan9201/CC-V1/releases).
 
@@ -36,7 +38,8 @@ flowchart LR
   c1["Layer 1 · billingualV1<br/>Animated templates<br/>Font, color, and position"]
   c2["Layer 2 · timelineV1<br/>3001 runs the batch<br/>3002 reviews, then burns"]
   c3["Layer 3 · overlayUndoV1<br/>Active-span overlay<br/>Undo, logs, and Killer"]
-  c0 --> c1 --> c2 --> c3
+  c4["Layer 4 · v4<br/>Word lane, live caption<br/>timer and progress bars"]
+  c0 --> c1 --> c2 --> c3 --> c4
 ```
 
 | Layer | What it adds |
@@ -45,5 +48,6 @@ flowchart LR
 | 1 · `billingualV1` | Burns three animations: Pop, Highlight, and Typewriter. Font, colors, position, and size are chosen in the form. The clean video is kept. |
 | 2 · `timelineV1` | The batch can run on its own, or stop so the cut, the text, and the animation can be corrected before the burn. The track can be Spanish, English, or both. Port 3002 opens the review; port 3001 processes without that screen. Both use API 8001. |
 | 3 · `overlayUndoV1` | On the cut, the span that is playing is marked with an overlay and a triangle. Ctrl+Z undoes up to five changes, so an accidental Quitar can be restored. Engine logs sit on the right: Continue releases the review, and Killer removes the video that is holding the queue. |
+| 4 · `v4` | Review follows the spoken line: a word lane, an on-video caption (Spanish below, English above), and frame-by-frame trim. Search jumps to the phrase; `*text*` forces uppercase. Highlight can paint Spanish and English in separate colors, with an ON/OFF switch. A millisecond timer runs from the moment the batch starts until the files are ready to download. Two bars sit under it: the whole job, and the active step (silence cut, Whisper, Spanish, English, and burn). |
 
 The note for each layer is in [Releases](https://github.com/Juan9201/CC-V1/releases).
