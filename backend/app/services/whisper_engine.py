@@ -1,7 +1,7 @@
 import threading
 from pathlib import Path
 
-from app.services.srt_io import Cue, group_words
+from app.services.srt_io import Cue, SpokenWord, group_words, word_language
 
 _model = None
 _lock = threading.Lock()
@@ -29,25 +29,44 @@ def get_model() -> object:
     return _model
 
 
-def transcribe_spanish(audio_path: Path) -> list[Cue]:
+def release_model() -> None:
+    """Suelta Whisper de la GPU antes de cargar el alineador del texto final."""
+    global _model
+    with _lock:
+        _model = None
+    import gc
+
+    gc.collect()
+
+
+def transcribe_spanish(audio_path: Path, on_progress=None) -> tuple[list[Cue], list[SpokenWord]]:
     """
     PROPÓSITO: Alinear palabras del audio ya cortado, aunque la clase mezcle español e inglés.
     CONEXIONES: faster-whisper en CUDA, sin un segundo recorte VAD. El idioma lo detecta el modelo.
     """
-    segments, _info = get_model().transcribe(
+    segments, info = get_model().transcribe(
         str(audio_path),
         word_timestamps=True,
         vad_filter=False,
         beam_size=5,
     )
-    words: list[tuple[float, float, str]] = []
+    words: list[SpokenWord] = []
+    duration = max(float(info.duration or 0), 0.001)
     for segment in segments:
-        if segment.words:
-            for word in segment.words:
-                words.append((float(word.start), float(word.end), word.word))
+        batch = segment.words or []
+        if batch:
+            for word in batch:
+                token = word.word.strip()
+                if not token:
+                    continue
+                words.append(SpokenWord(float(word.start), float(word.end), token, word_language(token)))
+                if on_progress is not None:
+                    on_progress(min(1.0, float(word.end) / duration), len(words), token)
             continue
         text = segment.text.strip()
         if text:
-            words.append((float(segment.start), float(segment.end), text))
+            words.append(SpokenWord(float(segment.start), float(segment.end), text, word_language(text)))
+            if on_progress is not None:
+                on_progress(min(1.0, float(segment.end) / duration), len(words), text)
 
-    return group_words(words)
+    return group_words(words), words

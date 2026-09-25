@@ -21,7 +21,12 @@ class Settings(BaseSettings):
     silence_noise_db: str = "-32dB"
     silence_min_duration: float = 0.45
     silence_pad: float = 0.18
-    cors_origins: list[str] = ["http://localhost:3000"]
+    cors_origins: list[str] = [
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+        "http://localhost:3002",
+        "http://127.0.0.1:3002",
+    ]
 
 
 settings = Settings()

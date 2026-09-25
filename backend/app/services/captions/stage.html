@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: __WIDTH__px;
+        height: __HEIGHT__px;
+        overflow: hidden;
+        background: transparent;
+      }
+      #stage {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-sizing: border-box;
+        padding: 12px 6%;
+      }
+      .line {
+        font-family: Caption, sans-serif;
+        font-weight: 700;
+        text-align: center;
+        line-height: 1.15;
+        width: auto;
+        max-width: 100%;
+        white-space: nowrap;
+        background: rgba(0, 0, 0, 0.55);
+        border-radius: 14px;
+        padding: 0.28em 0.55em;
+        text-shadow: 0 2px 2px rgba(0, 0, 0, 0.65);
+      }
+      .token {
+        display: inline-block;
+        white-space: pre;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage"></div>
+  </body>
+</html>

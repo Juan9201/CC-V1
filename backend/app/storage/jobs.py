@@ -1,9 +1,18 @@
+import time
 from threading import Lock
 from uuid import uuid4
 
-from app.schemas.job import BatchJob, DownloadLinks, VideoItem
+from app.schemas.job import BatchJob, CaptionStyle, DownloadLinks, JobProgress, LogLine, ProgressStep, VideoItem
 
-_ACTIVE = {"cutting", "transcribing", "refining"}
+_ACTIVE = {
+    "cutting",
+    "transcribing",
+    "refining",
+    "review_cut",
+    "review_cues",
+    "review_text",
+    "review_burn",
+}
 
 
 class JobStore:
@@ -16,10 +25,11 @@ class JobStore:
         self._jobs: dict[str, BatchJob] = {}
         self._lock = Lock()
 
-    def create(self, filenames: list[str]) -> BatchJob:
+    def create(self, filenames: list[str], style: CaptionStyle) -> BatchJob:
         job = BatchJob(
             job_id=uuid4().hex,
             status="queued",
+            style=style,
             items=[
                 VideoItem(file_id=uuid4().hex, filename=name, status="queued")
                 for name in filenames
@@ -43,6 +53,46 @@ class JobStore:
                 job.items[index] = item.model_copy(update=changes)
                 break
             self._refresh_status(job)
+
+    def append_log(self, job_id: str, source: str, message: str, level: str = "info") -> None:
+        line = LogLine(at=int(time.time() * 1000), level=level, source=source, message=message)  # type: ignore[arg-type]
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            job.logs.append(line)
+            if len(job.logs) > 400:
+                del job.logs[:-400]
+
+    def set_progress(
+        self,
+        job_id: str,
+        steps: list[tuple[str, str]],
+        key: str,
+        ratio: float,
+        label: str,
+        done: int = 0,
+        total: int = 0,
+    ) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            keys = [step[0] for step in steps]
+            index = keys.index(key) if key in keys else 0
+            job.progress = JobProgress(
+                steps=[ProgressStep(key=name, label=title) for name, title in steps],
+                index=index,
+                sub_ratio=max(0.0, min(1.0, ratio)),
+                sub_done=done,
+                sub_total=total,
+                sub_label=label,
+            )
+
+    def update_style(self, job_id: str, **changes: object) -> None:
+        with self._lock:
+            job = self._jobs[job_id]
+            job.style = job.style.model_copy(update=changes)
 
     def set_downloads(self, job_id: str, file_id: str, downloads: DownloadLinks) -> None:
         self.update_item(

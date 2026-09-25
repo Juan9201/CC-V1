@@ -2,8 +2,12 @@ backend/.env
 backend/.venv/
 backend/data/
 backend/tools/
+backend/models/
 frontend/node_modules/
 frontend/.next/
+frontend/.next-3001/
+frontend/.next-3002/
+frontend/tsconfig.tsbuildinfo
 .cursor/
 debug-*.log
 __pycache__/

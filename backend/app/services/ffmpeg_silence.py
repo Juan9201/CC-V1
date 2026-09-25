@@ -1,3 +1,4 @@
+import json
 import math
 import re
 import subprocess
@@ -138,7 +139,12 @@ def speech_ranges(
     return keeps or [(0.0, duration)]
 
 
-def _run(stream: ffmpeg.nodes.OutputStream, extra_args: list[str] | None = None) -> None:
+def _run(
+    stream: ffmpeg.nodes.OutputStream,
+    extra_args: list[str] | None = None,
+    on_progress=None,
+    duration: float = 0,
+) -> None:
     """Ejecuta el grafo. extra_args se insertan delante del archivo de salida."""
     argv = ffmpeg.compile(stream, cmd=ffmpeg_executable(), overwrite_output=True)
     if extra_args:
@@ -147,7 +153,24 @@ def _run(stream: ffmpeg.nodes.OutputStream, extra_args: list[str] | None = None)
             argv = argv[:-2] + extra_args + argv[-2:]
         else:
             argv = argv[:-1] + extra_args + argv[-1:]
-    completed = subprocess.run(argv, capture_output=True)
+    if on_progress is None or duration <= 0:
+        completed = subprocess.run(argv, capture_output=True)
+    else:
+        proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        clock = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
+        err = bytearray()
+        assert proc.stderr is not None
+        while True:
+            block = proc.stderr.read(256)
+            if not block:
+                break
+            err.extend(block)
+            match = clock.search(err.decode("utf-8", errors="replace")[-80:])
+            if match:
+                seen = int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
+                on_progress(min(1.0, seen / duration))
+        code = proc.wait()
+        completed = subprocess.CompletedProcess(argv, code, b"", bytes(err))
     if completed.returncode != 0:
         detail = completed.stderr.decode("utf-8", errors="replace")[-1800:]
         if "minimum required Nvidia driver" in detail:
@@ -164,16 +187,31 @@ def render_without_silence(
     work_dir: Path,
     *,
     vcodec: str = "h264_nvenc",
+    keeps: list[tuple[float, float]] | None = None,
+    on_progress=None,
 ) -> dict[str, float]:
     """
     PROPÓSITO: Quitar silencios en un solo encode NVENC para conservar una línea de tiempo.
-    CONEXIONES: FFmpeg / h264_nvenc.
+    CONEXIONES: FFmpeg / h264_nvenc. keeps permite repetir el corte con tramos editados a mano.
     """
     duration = media_duration(source)
-    silences = detect_silences(source)
-    keeps = speech_ranges(silences, duration)
+    if keeps is None:
+        silences = detect_silences(source)
+        keeps = speech_ranges(silences, duration)
+    else:
+        cleaned: list[tuple[float, float]] = []
+        for start, end in sorted(keeps):
+            start = max(0.0, min(start, duration))
+            end = max(0.0, min(end, duration))
+            if end - start >= 0.08:
+                cleaned.append((start, end))
+        keeps = cleaned or [(0.0, duration)]
     work_dir.mkdir(parents=True, exist_ok=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
+    (work_dir / "keeps.json").write_text(
+        json.dumps([{"start": start, "end": end} for start, end in keeps]),
+        encoding="utf-8",
+    )
 
     lines: list[str] = []
     for index, (start, end) in enumerate(keeps):
@@ -215,7 +253,15 @@ def render_without_silence(
         pix_fmt="yuv420p",
         **encode_options,
     )
-    _run(stream, ["-map", "[v]", "-map", "[ap]", "-t", f"{target:.6f}"])
+    span_total = max(len(keeps), 1)
+
+    def _cut_tick(ratio: float) -> None:
+        if on_progress is None:
+            return
+        done = min(span_total, max(1, round(ratio * span_total)))
+        on_progress(done / span_total, done, span_total)
+
+    _run(stream, ["-map", "[v]", "-map", "[ap]", "-t", f"{target:.6f}"], _cut_tick if on_progress else None, target)
     return probe_durations(dest)
 
 

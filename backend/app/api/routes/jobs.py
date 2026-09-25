@@ -1,10 +1,13 @@
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from app.config import settings
-from app.schemas.job import BatchJob
+from app.schemas.job import BatchJob, CueDraft, Span
+from app.services.caption_style import list_font_ids, parse_caption_style, resolve_font
+from app.services.review_gate import review_gate
 from app.services.worker import gpu_worker
 from app.storage.jobs import job_store
 
@@ -27,36 +30,102 @@ def _safe_name(name: str) -> str:
     return cleaned
 
 
-@router.post("", response_model=BatchJob, status_code=status.HTTP_202_ACCEPTED)
-async def create_job(files: list[UploadFile]) -> BatchJob:
+@router.get("/caption-options")
+async def caption_options() -> dict[str, list[str]]:
     """
-    PROPÓSITO: Recibir varios videos y encolarlos en el único worker de GPU.
-    CONEXIONES: Disco local. El corte y Whisper ocurren después, de a un archivo.
+    PROPÓSITO: Listar las fuentes y plantillas que la interfaz puede elegir.
+    CONEXIONES: Archivos de backend/fonts.
+    """
+    return {
+        "fonts": list_font_ids(),
+        "presets": ["pop", "highlight", "typewriter"],
+        "positions": ["bottom", "center"],
+        "sizes": ["sm", "md", "lg"],
+        "tracks": ["both", "es", "en"],
+        "modes": ["auto", "review"],
+    }
+
+
+@router.get("/worker")
+async def worker_status() -> dict[str, object]:
+    """
+    PROPÓSITO: Decir qué video tiene el worker y cuáles esperan en la cola.
+    CONEXIONES: GpuWorker y JobStore en memoria.
+    """
+    return gpu_worker.status()
+
+
+@router.post("/worker/continue")
+async def worker_continue() -> dict[str, object]:
+    """
+    PROPÓSITO: Soltar la revisión del video que tiene parado al worker.
+    CONEXIONES: ReviewGate. El pipeline sigue con ese mismo archivo.
+    """
+    active = gpu_worker.status().get("active")
+    if not isinstance(active, dict) or not active.get("reviewing"):
+        raise HTTPException(status_code=409, detail="No hay un video detenido en revisión")
+    review_gate.release(str(active["job_id"]), str(active["file_id"]))
+    job_store.append_log(str(active["job_id"]), "review", f"Continue: {active['filename']}")
+    return active
+
+
+@router.post("/worker/kill")
+async def worker_kill() -> dict[str, object]:
+    """
+    PROPÓSITO: Sacar de la cola el video que está bloqueando al worker.
+    CONEXIONES: Si está en revisión, suelta la espera y el pipeline se detiene.
+    """
+    report = gpu_worker.status()
+    active = report.get("active")
+    queued = report.get("queued")
+    target = active if isinstance(active, dict) else None
+    if target is None and isinstance(queued, list) and queued:
+        target = queued[0]
+    if not isinstance(target, dict):
+        raise HTTPException(status_code=409, detail="La cola está vacía")
+    job_store.update_item(
+        str(target["job_id"]),
+        str(target["file_id"]),
+        cancelled=True,
+        status="error",
+        error="Killer",
+        detail="Eliminado de la cola",
+    )
+    job_store.append_log(str(target["job_id"]), "worker", f"Killer elimina de la cola: {target['filename']}", "warn")
+    review_gate.release(str(target["job_id"]), str(target["file_id"]))
+    return target
+
+
+@router.post("", response_model=BatchJob, status_code=status.HTTP_202_ACCEPTED)
+async def create_job(
+    files: list[UploadFile] = File(...),
+    preset: str = Form("pop"),
+    font: str = Form("Inter"),
+    text_color: str = Form("#FFFFFF"),
+    highlight_color: str = Form("#FFE14A"),
+    position: str = Form("bottom"),
+    size: str = Form("md"),
+    track: str = Form("both"),
+    mode: str = Form("auto"),
+    lang_colors: bool = Form(True),
+    es_text_color: str = Form("#FFFFFF"),
+    es_highlight_color: str = Form("#22C55E"),
+    en_text_color: str = Form("#FFFFFF"),
+    en_highlight_color: str = Form("#0094FF"),
+) -> BatchJob:
+    """
+    PROPÓSITO: Recibir varios videos y el estilo de subtítulos, y encolarlos en el worker.
+    CONEXIONES: Disco local. El corte, Whisper y el quemado ocurren después, de a un archivo.
     """
     if not files:
         raise HTTPException(status_code=400, detail="Sube al menos un video")
-
-    # #region agent log
-    import json
-    import time
-
-    with open(r"c:\AI CC\debug-03e0cf.log", "a", encoding="utf-8") as handle:
-        handle.write(
-            json.dumps(
-                {
-                    "sessionId": "03e0cf",
-                    "runId": "post-fix",
-                    "hypothesisId": "H4",
-                    "location": "jobs.py:create_job",
-                    "message": "upload reached api",
-                    "data": {"filenames": [item.filename for item in files]},
-                    "timestamp": int(time.time() * 1000),
-                },
-                ensure_ascii=False,
-            )
-            + "\n"
+    try:
+        style = parse_caption_style(
+            preset, font, text_color, highlight_color, position, size, track, mode,
+            lang_colors, es_text_color, es_highlight_color, en_text_color, en_highlight_color,
         )
-    # #endregion
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     names: list[str] = []
     for upload in files:
@@ -65,7 +134,7 @@ async def create_job(files: list[UploadFile]) -> BatchJob:
             raise HTTPException(status_code=400, detail=f"Extensión no admitida: {filename}")
         names.append(filename)
 
-    job = job_store.create(names)
+    job = job_store.create(names, style)
     staged: list[tuple[str, Path]] = []
     for upload, item in zip(files, job.items, strict=True):
         suffix = Path(item.filename).suffix.lower()
@@ -77,9 +146,170 @@ async def create_job(files: list[UploadFile]) -> BatchJob:
                 handle.write(chunk)
         staged.append((item.file_id, dest))
 
+    job_store.append_log(job.job_id, "api", f"Recibidos {len(staged)} video(s). Modo {style.mode}, idioma {style.track}.")
     gpu_worker.submit(job.job_id, staged)
     stored = job_store.get(job.job_id)
     return stored if stored is not None else job
+
+
+class ReviewBody(BaseModel):
+    keeps: list[Span] = Field(default_factory=list)
+    cues: list[CueDraft] = Field(default_factory=list)
+    cues_en: list[CueDraft] = Field(default_factory=list)
+    recut: bool = False
+    preset: str | None = None
+    font: str | None = None
+    text_color: str | None = None
+    highlight_color: str | None = None
+    position: str | None = None
+    size: str | None = None
+    caption_preview: bool | None = None
+    lang_colors: bool | None = None
+    es_text_color: str | None = None
+    es_highlight_color: str | None = None
+    en_text_color: str | None = None
+    en_highlight_color: str | None = None
+
+
+@router.get("/fonts/{font_id}")
+async def font_file(font_id: str) -> FileResponse:
+    """
+    PROPÓSITO: Servir una fuente de backend/fonts para la previsualización.
+    CONEXIONES: El nombre es el stem del archivo, nunca una ruta.
+    """
+    try:
+        path, _css_format = resolve_font(font_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    media = {
+        ".woff2": "font/woff2",
+        ".ttf": "font/ttf",
+        ".otf": "font/otf",
+    }.get(path.suffix.lower(), "application/octet-stream")
+    return FileResponse(path, media_type=media, filename=path.name)
+
+
+class StyleBody(BaseModel):
+    preset: str | None = None
+    font: str | None = None
+    text_color: str | None = None
+    highlight_color: str | None = None
+    position: str | None = None
+    size: str | None = None
+    lang_colors: bool | None = None
+    es_text_color: str | None = None
+    es_highlight_color: str | None = None
+    en_text_color: str | None = None
+    en_highlight_color: str | None = None
+
+
+@router.put("/{job_id}/style", response_model=BatchJob)
+async def update_job_style(job_id: str, body: StyleBody) -> BatchJob:
+    """Guarda colores y plantilla del lote para que el quemado use el mismo estilo que la pantalla."""
+    job = job_store.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Lote no encontrado")
+    changes = {key: value for key, value in body.model_dump().items() if value is not None}
+    if changes:
+        merged = job.style.model_copy(update=changes)
+        try:
+            parse_caption_style(
+                merged.preset,
+                merged.font,
+                merged.text_color,
+                merged.highlight_color,
+                merged.position,
+                merged.size,
+                merged.track,
+                merged.mode,
+                merged.lang_colors,
+                merged.es_text_color,
+                merged.es_highlight_color,
+                merged.en_text_color,
+                merged.en_highlight_color,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        job_store.update_style(job_id, **changes)
+    stored = job_store.get(job_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail="Lote no encontrado")
+    return stored
+
+
+@router.put("/{job_id}/files/{file_id}/review", response_model=BatchJob)
+async def save_review(job_id: str, file_id: str, body: ReviewBody) -> BatchJob:
+    """
+    PROPÓSITO: Guardar cortes, frases y estilo mientras el worker está detenido.
+    CONEXIONES: JobStore en memoria. No reanuda el worker.
+    """
+    job = job_store.get(job_id)
+    if job is None or not any(item.file_id == file_id for item in job.items):
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
+    job_store.update_item(
+        job_id,
+        file_id,
+        keeps=body.keeps,
+        cues=body.cues,
+        cues_en=body.cues_en,
+        recut=body.recut,
+    )
+    style_changes = {
+        key: value
+        for key, value in {
+            "preset": body.preset,
+            "font": body.font,
+            "text_color": body.text_color,
+            "highlight_color": body.highlight_color,
+            "position": body.position,
+            "size": body.size,
+            "caption_preview": body.caption_preview,
+            "lang_colors": body.lang_colors,
+            "es_text_color": body.es_text_color,
+            "es_highlight_color": body.es_highlight_color,
+            "en_text_color": body.en_text_color,
+            "en_highlight_color": body.en_highlight_color,
+        }.items()
+        if value is not None
+    }
+    if style_changes:
+        try:
+            merged = job.style.model_copy(update=style_changes)
+            parse_caption_style(
+                merged.preset,
+                merged.font,
+                merged.text_color,
+                merged.highlight_color,
+                merged.position,
+                merged.size,
+                merged.track,
+                merged.mode,
+                merged.lang_colors,
+                merged.es_text_color,
+                merged.es_highlight_color,
+                merged.en_text_color,
+                merged.en_highlight_color,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        job_store.update_style(job_id, **style_changes)
+    stored = job_store.get(job_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail="Lote no encontrado")
+    return stored
+
+
+@router.post("/{job_id}/files/{file_id}/continue", response_model=BatchJob)
+async def continue_review(job_id: str, file_id: str) -> BatchJob:
+    """
+    PROPÓSITO: Soltar el worker para el siguiente paso del archivo en revisión.
+    CONEXIONES: ReviewGate. El worker ya debe estar esperando.
+    """
+    job = job_store.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Lote no encontrado")
+    review_gate.release(job_id, file_id)
+    return job
 
 
 @router.get("/{job_id}", response_model=BatchJob)
