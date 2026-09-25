@@ -3,13 +3,14 @@ from pathlib import Path
 
 from app.config import settings
 from app.schemas.job import CaptionStyle, CueDraft, DownloadLinks, Span, WordTick
-from app.services import caption_burn, deepseek_subtitles, ffmpeg_silence, whisper_engine
+from app.services import align_audio, caption_burn, deepseek_subtitles, ffmpeg_silence, lip_sync, whisper_engine
+from app.services.sync_times import fuse
 from app.services.review_gate import review_gate
 
 
 class JobCancelled(Exception):
     """El operador sacó este video de la cola."""
-from app.services.srt_io import Cue, render_srt
+from app.services.srt_io import Cue, render_srt, split_comma_lists
 from app.storage.jobs import job_store
 
 
@@ -44,10 +45,11 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
         steps.append(("es", "Español"))
     if want_en:
         steps.append(("en", "Inglés"))
+    steps.append(("sync", "Sincronía"))
     steps.append(("burn", "Quemado"))
 
-    def report(key: str, ratio: float, label: str) -> None:
-        job_store.set_progress(job_id, steps, key, ratio, label)
+    def report(key: str, ratio: float, label: str, done: int = 0, total: int = 0) -> None:
+        job_store.set_progress(job_id, steps, key, ratio, label, done, total)
 
     def current_style() -> CaptionStyle:
         fresh = job_store.get(job_id)
@@ -64,23 +66,68 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
             video_en=f"{base}/video-en" if burned_en.exists() else None,
         )
 
+    spanish: list[Cue] = []
+    english: list[Cue] = []
+
+    def _synced_words(whisper_words: list) -> tuple[list, list]:
+        if not spanish and not english:
+            return [], []
+        report("sync", 0, "Alineando texto con la voz")
+        job_store.append_log(job_id, "sync", "Alineando el texto final con el audio")
+        whisper_engine.release_model()
+        aligned: list[list] = []
+        try:
+            aligned = align_audio.align_cues(
+                wav_path,
+                spanish,
+                on_progress=lambda done, total: report(
+                    "sync", done / max(total, 1) * 0.7, f"frase {done}/{total}", done, total
+                ),
+            )
+        finally:
+            align_audio.release()
+        report("sync", 0.7, "Midiendo los labios")
+        mouth = lip_sync.measure(
+            video_out,
+            wav_path,
+            work,
+            on_progress=lambda done, total: report(
+                "sync", 0.7 + done / max(total, 1) * 0.3, f"fotograma {done}/{total}", done, total
+            ),
+        )
+        job_store.append_log(
+            job_id,
+            "sync",
+            f"Boca lista: {len(mouth.opens)} aperturas, desfase {mouth.offset:.3f}s",
+        )
+        return fuse(spanish, english, whisper_words, aligned, mouth)
+
     def burn_ready() -> str | None:
         active = current_style()
         note = None
-        spoken_now = item_now().words
+        spoken_now = list(item_now().words)
+        timing_es, timing_en = _synced_words(spoken_now)
+        if timing_es or timing_en:
+            job_store.update_item(job_id, file_id, words=timing_es or timing_en)
         if want_es and want_en and srt_es.exists():
             try:
-                caption_burn.burn_bilingual(video_out, srt_es, burned_es, active, work / "burn-es", spoken_now)
+                caption_burn.burn_bilingual(
+                    video_out, srt_es, burned_es, active, work / "burn-es", spoken_now, timing_es, timing_en
+                )
             except Exception as exc:
                 note = f"No se pudo incrustar el subtítulo en español: {exc}"
         elif want_es and srt_es.exists():
             try:
-                caption_burn.burn_srt(video_out, srt_es, burned_es, active, work / "burn-es", spoken_now)
+                caption_burn.burn_srt(
+                    video_out, srt_es, burned_es, active, work / "burn-es", timing_es or spoken_now, "es"
+                )
             except Exception as exc:
                 note = f"No se pudo incrustar el subtítulo en español: {exc}"
         if want_en and srt_en.exists():
             try:
-                caption_burn.burn_srt(video_out, srt_en, burned_en, active, work / "burn-en")
+                caption_burn.burn_srt(
+                    video_out, srt_en, burned_en, active, work / "burn-en", timing_en or spoken_now, "en"
+                )
             except Exception as exc:
                 note = f"No se pudo incrustar el subtítulo en inglés: {exc}"
         return note
@@ -151,7 +198,7 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
                 video_out,
                 work,
                 keeps=keeps,
-                on_progress=lambda ratio: report("cut", ratio, "Cortando silencios"),
+                on_progress=lambda ratio, done=0, total=0: report("cut", ratio, f"corte {done}/{total}", done, total),
             )
             report("cut", 1, "Corte listo")
             saved = json.loads((work / "keeps.json").read_text(encoding="utf-8"))
@@ -175,7 +222,13 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
         report("whisper", 0.08, "Transcribiendo")
         cues, spoken = whisper_engine.transcribe_spanish(
             wav_path,
-            on_progress=lambda ratio: report("whisper", 0.08 + ratio * 0.92, "Transcribiendo"),
+            on_progress=lambda ratio, count=0, token="": report(
+                "whisper",
+                0.08 + ratio * 0.92,
+                f"palabra {count}: {token}",
+                count,
+                0,
+            ),
         )
         report("whisper", 1, "Transcripción lista")
         if not cues:
@@ -206,7 +259,13 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
         report("es" if want_es else "en", 0, detail)
         spanish = deepseek_subtitles.correct_spanish(
             cues,
-            on_progress=lambda ratio: report("es" if want_es else "en", ratio, detail),
+            on_progress=lambda ratio, done=0, total=0, marks=0: report(
+                "es" if want_es else "en",
+                ratio,
+                f"frase {done}/{total} · {marks} signos · entrada y salida",
+                done,
+                total,
+            ),
         )
         job_store.append_log(job_id, "deepseek", f"Español listo: {len(spanish)} frases")
         if review and want_es:
@@ -219,13 +278,18 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
             spanish = as_cues(item_now().cues)
         if want_es:
             srt_es.write_text(render_srt(spanish), encoding="utf-8")
-        english: list[Cue] = []
         if want_en:
             job_store.append_log(job_id, "deepseek", "Traduciendo al inglés")
             report("en", 0, "Traduciendo al inglés")
             english = deepseek_subtitles.translate_english(
                 spanish,
-                on_progress=lambda ratio: report("en", ratio, "Traduciendo al inglés"),
+                on_progress=lambda ratio, done=0, total=0, marks=0: report(
+                    "en",
+                    ratio,
+                    f"frase {done}/{total} · {marks} signos · entrada y salida",
+                    done,
+                    total,
+                ),
             )
             job_store.append_log(job_id, "deepseek", f"Inglés listo: {len(english)} frases")
             if review:
@@ -266,6 +330,13 @@ def process_file(job_id: str, file_id: str, source: Path) -> None:
             elif want_en:
                 english = as_cues(item_now().cues)
                 srt_en.write_text(render_srt(english), encoding="utf-8")
+
+        spanish = split_comma_lists(spanish)
+        english = split_comma_lists(english)
+        if want_es:
+            srt_es.write_text(render_srt(spanish), encoding="utf-8")
+        if want_en and english:
+            srt_en.write_text(render_srt(english), encoding="utf-8")
 
         job_store.update_item(job_id, file_id, status="refining", detail="Incrustando subtítulos animados")
         job_store.append_log(job_id, "ffmpeg", "Quemando subtítulos animados")

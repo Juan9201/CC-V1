@@ -253,7 +253,15 @@ def render_without_silence(
         pix_fmt="yuv420p",
         **encode_options,
     )
-    _run(stream, ["-map", "[v]", "-map", "[ap]", "-t", f"{target:.6f}"], on_progress, target)
+    span_total = max(len(keeps), 1)
+
+    def _cut_tick(ratio: float) -> None:
+        if on_progress is None:
+            return
+        done = min(span_total, max(1, round(ratio * span_total)))
+        on_progress(done / span_total, done, span_total)
+
+    _run(stream, ["-map", "[v]", "-map", "[ap]", "-t", f"{target:.6f}"], _cut_tick if on_progress else None, target)
     return probe_durations(dest)
 
 

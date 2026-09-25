@@ -124,6 +124,27 @@ def parse_srt(text: str) -> list[Cue]:
     return cues
 
 
+def split_comma_lists(cues: list[Cue]) -> list[Cue]:
+    """Parte una frase cuando hay más de 3 trozos separados solo por comas."""
+    rows: list[Cue] = []
+    for cue in cues:
+        parts = [part.strip() for part in cue.text.split(",") if part.strip()]
+        if len(parts) <= 3:
+            rows.append(cue)
+            continue
+        span = max(0.04 * len(parts), cue.end - cue.start)
+        each = span / len(parts)
+        for index, part in enumerate(parts):
+            text = part if index == len(parts) - 1 or part[-1:] in ".?!" else f"{part},"
+            start = cue.start + index * each
+            rows.append(Cue(index=0, start=start, end=start + each, text=text, lang=cue.lang))
+    numbered = [
+        Cue(index=index, start=cue.start, end=cue.end, text=cue.text, lang=cue.lang)
+        for index, cue in enumerate(rows, start=1)
+    ]
+    return numbered
+
+
 def replace_text(cues: list[Cue], texts: list[str]) -> list[Cue]:
     """Sustituye solo el texto. Los tiempos de cada cue se quedan igual."""
     if len(cues) != len(texts):

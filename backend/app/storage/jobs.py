@@ -64,7 +64,16 @@ class JobStore:
             if len(job.logs) > 400:
                 del job.logs[:-400]
 
-    def set_progress(self, job_id: str, steps: list[tuple[str, str]], key: str, ratio: float, label: str) -> None:
+    def set_progress(
+        self,
+        job_id: str,
+        steps: list[tuple[str, str]],
+        key: str,
+        ratio: float,
+        label: str,
+        done: int = 0,
+        total: int = 0,
+    ) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
@@ -75,6 +84,8 @@ class JobStore:
                 steps=[ProgressStep(key=name, label=title) for name, title in steps],
                 index=index,
                 sub_ratio=max(0.0, min(1.0, ratio)),
+                sub_done=done,
+                sub_total=total,
                 sub_label=label,
             )
 

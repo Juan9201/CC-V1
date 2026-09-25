@@ -101,11 +101,11 @@ export function BatchUploader() {
   const [fonts, setFonts] = useState<string[]>(["Inter"]);
   const [textColor, setTextColor] = useState("#ffffff");
   const [highlightColor, setHighlightColor] = useState("#ffe14a");
-  const [langColors, setLangColors] = useState(false);
+  const [langColors, setLangColors] = useState(true);
   const [esTextColor, setEsTextColor] = useState("#ffffff");
   const [esHighlightColor, setEsHighlightColor] = useState("#22c55e");
-  const [enTextColor, setEnTextColor] = useState("#38bdf8");
-  const [enHighlightColor, setEnHighlightColor] = useState("#e0f2fe");
+  const [enTextColor, setEnTextColor] = useState("#ffffff");
+  const [enHighlightColor, setEnHighlightColor] = useState("#0094ff");
   const [position, setPosition] = useState("bottom");
   const [size, setSize] = useState("md");
   const [track, setTrack] = useState("both");
@@ -284,6 +284,13 @@ export function BatchUploader() {
     }
     liveStyle.current = { ...liveStyle.current, ...patch };
     setJob((current) => (current ? { ...current, style: { ...current.style, ...patch } } : current));
+    if (jobId) {
+      void fetch(`/api/jobs/${jobId}/style`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+    }
   }
 
   function addFiles(list: FileList | File[]) {
@@ -319,6 +326,11 @@ export function BatchUploader() {
     body.append("size", size);
     body.append("track", track);
     body.append("mode", mode);
+    body.append("lang_colors", langColors ? "true" : "false");
+    body.append("es_text_color", esTextColor);
+    body.append("es_highlight_color", esHighlightColor);
+    body.append("en_text_color", enTextColor);
+    body.append("en_highlight_color", enHighlightColor);
     try {
       const response = await fetch("/api/jobs", { method: "POST", body });
       const raw = await response.text();
@@ -667,7 +679,7 @@ export function BatchUploader() {
           <p className="text-[11px] text-zinc-400">
             {processClock.end === null ? "En curso" : jobStatus === "error" ? "Detenido" : "Listo para descargar"}
           </p>
-          <ProgressBars progress={job?.progress} done={processClock.end !== null && jobStatus !== "error"} />
+          <ProgressBars job={job} done={processClock.end !== null && jobStatus !== "error"} />
         </div>
       )}
     </aside>
@@ -679,19 +691,70 @@ function isQueueDecision(message: string) {
   return message.startsWith("Killer elimina") || message.startsWith("Killer eliminó") || message.startsWith("Continue continúa") || message.startsWith("Continue:");
 }
 
-function ProgressBars({
-  progress,
-  done,
-}: {
-  progress?: BatchJob["progress"];
-  done: boolean;
-}) {
-  const steps = progress?.steps ?? [];
-  const count = Math.max(steps.length, 1);
-  const sub = done ? 1 : Math.max(0, Math.min(1, progress?.sub_ratio ?? 0));
-  const index = done ? count : progress?.index ?? 0;
-  const overall = done ? 1 : Math.max(0, Math.min(1, (index + sub) / count));
-  const current = steps[Math.min(index, steps.length - 1)];
+function planMilestones(job: BatchJob | null | undefined, done: boolean) {
+  const track = job?.style.track ?? "both";
+  const steps = [
+    { key: "cut", label: "Corte de silencios" },
+    { key: "whisper", label: "Whisper" },
+  ];
+  if (track !== "en") {
+    steps.push({ key: "es", label: "Español" });
+  }
+  if (track !== "es") {
+    steps.push({ key: "en", label: "Inglés" });
+  }
+  steps.push({ key: "sync", label: "Sincronía" });
+  steps.push({ key: "burn", label: "Quemado" });
+  const notes = (job?.logs ?? []).map((line) => line.message).join("\n");
+  const reached: Record<string, boolean> = {
+    cut: /Corte listo/.test(notes),
+    whisper: /Transcripción lista/.test(notes),
+    es: /Español listo/.test(notes),
+    en: /Inglés listo/.test(notes),
+    sync: /Boca lista/.test(notes),
+    burn: /Quemado listo/.test(notes) || done,
+  };
+  const item = job?.items[0];
+  const detail = `${item?.status ?? ""} ${item?.detail ?? ""}`;
+  let active = steps.find((step) => !reached[step.key])?.key ?? "burn";
+  if (/cutting|review_cut/.test(detail)) {
+    active = "cut";
+  } else if (/transcribing|review_cues/.test(detail)) {
+    active = "whisper";
+  } else if (/Inglés|inglés|Traduciendo|review_language.: .en/.test(detail)) {
+    active = "en";
+  } else if (/Alineando el texto|Midiendo los labios|fotograma /.test(detail)) {
+    active = "sync";
+  } else if (/Incrustando|Quemando|review_burn/.test(detail)) {
+    active = "burn";
+  } else if (/refining|review_text|Corrigiendo/.test(detail)) {
+    active = track === "en" ? "en" : "es";
+  }
+  const index = Math.max(0, steps.findIndex((step) => step.key === active));
+  const server = job?.progress;
+  if ((server?.steps?.length ?? 0) > 0 && server) {
+    const sub = done ? 1 : Math.max(0, Math.min(1, server.sub_ratio));
+    const index = done ? server.steps.length : server.index;
+    const overall = done ? 1 : Math.min(1, (index + sub) / server.steps.length);
+    return {
+      steps: server.steps,
+      index,
+      sub,
+      overall,
+      label: done ? "Listo" : server.sub_label || server.steps[server.index]?.label || "Esperando",
+      finished: index,
+    };
+  }
+  const serverStep = server?.steps?.[server.index]?.key;
+  const sub = done || reached[active] ? 1 : serverStep === active ? server?.sub_ratio ?? 0.15 : 0.15;
+  const finished = steps.filter((step) => reached[step.key]).length;
+  const overall = done ? 1 : Math.min(1, (finished + (reached[active] ? 0 : sub)) / steps.length);
+  return { steps, index, sub, overall, label: done ? "Listo" : steps[index]?.label ?? "Esperando", finished };
+}
+
+function ProgressBars({ job, done }: { job: BatchJob | null | undefined; done: boolean }) {
+  const plan = planMilestones(job, done);
+  const { steps, index, sub, overall } = plan;
   return (
     <div className="mt-3 space-y-2 font-sans">
       <div>
@@ -715,7 +778,7 @@ function ProgressBars({
       </div>
       <div>
         <div className="mb-1 flex justify-between text-[10px] uppercase tracking-wide text-zinc-500">
-          <span>{done ? "Listo" : progress?.sub_label || current?.label || "Esperando"}</span>
+          <span>{plan.label}</span>
           <span>{Math.round(sub * 100)}%</span>
         </div>
         <div className="h-2 overflow-hidden rounded-full bg-zinc-800">

@@ -107,6 +107,11 @@ async def create_job(
     size: str = Form("md"),
     track: str = Form("both"),
     mode: str = Form("auto"),
+    lang_colors: bool = Form(True),
+    es_text_color: str = Form("#FFFFFF"),
+    es_highlight_color: str = Form("#22C55E"),
+    en_text_color: str = Form("#FFFFFF"),
+    en_highlight_color: str = Form("#0094FF"),
 ) -> BatchJob:
     """
     PROPÓSITO: Recibir varios videos y el estilo de subtítulos, y encolarlos en el worker.
@@ -116,7 +121,8 @@ async def create_job(
         raise HTTPException(status_code=400, detail="Sube al menos un video")
     try:
         style = parse_caption_style(
-            preset, font, text_color, highlight_color, position, size, track, mode
+            preset, font, text_color, highlight_color, position, size, track, mode,
+            lang_colors, es_text_color, es_highlight_color, en_text_color, en_highlight_color,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -158,6 +164,11 @@ class ReviewBody(BaseModel):
     position: str | None = None
     size: str | None = None
     caption_preview: bool | None = None
+    lang_colors: bool | None = None
+    es_text_color: str | None = None
+    es_highlight_color: str | None = None
+    en_text_color: str | None = None
+    en_highlight_color: str | None = None
 
 
 @router.get("/fonts/{font_id}")
@@ -176,6 +187,54 @@ async def font_file(font_id: str) -> FileResponse:
         ".otf": "font/otf",
     }.get(path.suffix.lower(), "application/octet-stream")
     return FileResponse(path, media_type=media, filename=path.name)
+
+
+class StyleBody(BaseModel):
+    preset: str | None = None
+    font: str | None = None
+    text_color: str | None = None
+    highlight_color: str | None = None
+    position: str | None = None
+    size: str | None = None
+    lang_colors: bool | None = None
+    es_text_color: str | None = None
+    es_highlight_color: str | None = None
+    en_text_color: str | None = None
+    en_highlight_color: str | None = None
+
+
+@router.put("/{job_id}/style", response_model=BatchJob)
+async def update_job_style(job_id: str, body: StyleBody) -> BatchJob:
+    """Guarda colores y plantilla del lote para que el quemado use el mismo estilo que la pantalla."""
+    job = job_store.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Lote no encontrado")
+    changes = {key: value for key, value in body.model_dump().items() if value is not None}
+    if changes:
+        merged = job.style.model_copy(update=changes)
+        try:
+            parse_caption_style(
+                merged.preset,
+                merged.font,
+                merged.text_color,
+                merged.highlight_color,
+                merged.position,
+                merged.size,
+                merged.track,
+                merged.mode,
+                merged.lang_colors,
+                merged.es_text_color,
+                merged.es_highlight_color,
+                merged.en_text_color,
+                merged.en_highlight_color,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        job_store.update_style(job_id, **changes)
+    stored = job_store.get(job_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail="Lote no encontrado")
+    return stored
 
 
 @router.put("/{job_id}/files/{file_id}/review", response_model=BatchJob)
@@ -205,6 +264,11 @@ async def save_review(job_id: str, file_id: str, body: ReviewBody) -> BatchJob:
             "position": body.position,
             "size": body.size,
             "caption_preview": body.caption_preview,
+            "lang_colors": body.lang_colors,
+            "es_text_color": body.es_text_color,
+            "es_highlight_color": body.es_highlight_color,
+            "en_text_color": body.en_text_color,
+            "en_highlight_color": body.en_highlight_color,
         }.items()
         if value is not None
     }
@@ -220,6 +284,11 @@ async def save_review(job_id: str, file_id: str, body: ReviewBody) -> BatchJob:
                 merged.size,
                 merged.track,
                 merged.mode,
+                merged.lang_colors,
+                merged.es_text_color,
+                merged.es_highlight_color,
+                merged.en_text_color,
+                merged.en_highlight_color,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -82,13 +82,14 @@ def _texts_for(cues: list[Cue], system: str, user_intro: str, on_progress=None) 
             lines = _ask_lines(client, system, user_intro, chunk)
         if lines is not None:
             done += len(chunk)
+            marks = sum(line.count(sign) for line in lines for sign in ".,")
             if on_progress is not None:
-                on_progress(min(1.0, done / total))
+                on_progress(min(1.0, done / total), done, total, marks)
             return lines
         if len(chunk) == 1:
             done += 1
             if on_progress is not None:
-                on_progress(min(1.0, done / total))
+                on_progress(min(1.0, done / total), done, total, chunk[0].text.count(".") + chunk[0].text.count(","))
             return [chunk[0].text]
         mid = len(chunk) // 2
         return collect(chunk[:mid]) + collect(chunk[mid:])

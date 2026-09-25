@@ -53,33 +53,24 @@ function buildCue(spec) {
   stage.appendChild(line);
 
   const tl = gsap.timeline({ paused: true });
-  const outroStart = Math.max(0, spec.duration - spec.outro);
   if (spec.preset === "typewriter") {
     const count = Math.max(tokens.length, 1);
     const stagger = spec.typeWindow / count;
-    tl.from(
-      tokens,
-      { opacity: 0, duration: Math.min(0.08, stagger || 0.08), stagger, ease: "none" },
-      0,
-    );
+    tl.set(tokens, { opacity: 0 }, 0);
+    tokens.forEach((el, index) => {
+      tl.set(el, { opacity: 1 }, index * stagger);
+    });
   } else if (spec.preset === "highlight") {
-    tl.from(line, { y: 12, opacity: 0, duration: spec.intro, ease: "power3.out" }, 0);
     spec.marks.forEach((mark, index) => {
       const el = tokens[index];
       if (!el) {
         return;
       }
-      tl.to(el, { color: spec.highlightColor, duration: mark.fade }, mark.start);
-      tl.to(el, { color: spec.textColor, duration: mark.fade }, mark.start + mark.fade + mark.stay);
+      tl.set(el, { color: spec.highlightColor }, mark.start);
+      tl.set(el, { color: spec.textColor }, mark.start + mark.stay);
     });
-  } else {
-    const stagger = Math.min(0.04, spec.intro / Math.max(tokens.length, 1));
-    tl.from(line, { y: 12, opacity: 0, duration: spec.intro, ease: "power3.out" }, 0);
-    tl.from(tokens, { scale: 0.92, duration: spec.intro, stagger, ease: "power3.out" }, 0);
   }
-  if (spec.outro > 0 && outroStart < spec.duration) {
-    tl.to(line, { opacity: 0, duration: spec.outro, ease: "power1.in" }, outroStart);
-  }
+  tl.set(line, { opacity: 1 }, spec.duration);
   window.__tl = tl;
 }
 
@@ -88,6 +79,14 @@ window.loadCue = async (spec) => {
   buildCue(spec);
   await document.fonts.load(spec.fontPx + "px Caption");
   await document.fonts.ready;
+  const line = document.querySelector(".line");
+  const stage = document.getElementById("stage");
+  const maxWidth = stage.clientWidth * 0.92;
+  let size = spec.fontPx;
+  while (line && line.scrollWidth > maxWidth && size > 16) {
+    size -= 1;
+    line.style.fontSize = size + "px";
+  }
   window.__tl.time(0, false);
 };
 

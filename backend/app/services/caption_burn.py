@@ -28,6 +28,7 @@ def burn_srt(
     style: CaptionStyle,
     work_dir: Path,
     words: list[WordTick] | None = None,
+    force_lang: str = "",
 ) -> None:
     """
     PROPÓSITO: Incrustar un SRT con la plantilla GSAP elegida para el lote.
@@ -36,7 +37,7 @@ def burn_srt(
     cues = parse_srt(subtitles.read_text(encoding="utf-8"))
     if not cues:
         raise RuntimeError("El SRT no tiene frases para animar")
-    _burn(video, cues, dest, style, work_dir, words or [])
+    _burn(video, cues, dest, style, work_dir, words or [], force_lang)
 
 
 def burn_bilingual(
@@ -46,6 +47,8 @@ def burn_bilingual(
     style: CaptionStyle,
     work_dir: Path,
     words: list[WordTick],
+    timing_es: list[WordTick] | None = None,
+    timing_en: list[WordTick] | None = None,
 ) -> None:
     """
     PROPÓSITO: Quemar el ejemplo en inglés arriba y la explicación en español abajo.
@@ -57,14 +60,14 @@ def burn_bilingual(
     english = [cue for cue in cues if _cue_lang(cue, words) == "en"]
     spanish = [cue for cue in cues if _cue_lang(cue, words) != "en"]
     if not english or not spanish:
-        _burn(video, cues, dest, style, work_dir, words)
+        _burn(video, cues, dest, style, work_dir, timing_es or words, "es")
         return
     width, height = _video_size(video)
     duration = probe_durations(video).get("video") or probe_durations(video)["format"]
     font_px = max(18, round(_SIZE_PX[style.size] * (height / 1080)))
     strip_h = _strip_height(height, font_px)
-    en_overlay = _render_overlay(video, english, style, work_dir / "en", words)
-    es_overlay = _render_overlay(video, spanish, style, work_dir / "es", words)
+    en_overlay = _render_overlay(video, english, style, work_dir / "en", timing_en or words, "en")
+    es_overlay = _render_overlay(video, spanish, style, work_dir / "es", timing_es or words, "es")
     y_es = _overlay_y(style.position, height, strip_h)
     y_en = max(0, y_es - strip_h - 8)
     _composite_two(video, en_overlay, es_overlay, dest, y_en, y_es, duration)
@@ -86,13 +89,22 @@ def _burn(
     style: CaptionStyle,
     work_dir: Path,
     words: list[WordTick],
+    force_lang: str = "",
 ) -> None:
-    overlay = _render_overlay(video, cues, style, work_dir, words)
+    overlay = _render_overlay(video, cues, style, work_dir, words, force_lang)
     width, height = _video_size(video)
     font_px = max(18, round(_SIZE_PX[style.size] * (height / 1080)))
     duration = probe_durations(video).get("video") or probe_durations(video)["format"]
     _composite(video, overlay, dest, _overlay_y(style.position, height, _strip_height(height, font_px)), duration)
     overlay.unlink(missing_ok=True)
+
+
+def _caption_colors(style: CaptionStyle, lang: str) -> tuple[str, str]:
+    if style.preset == "highlight" and style.lang_colors:
+        if lang == "en":
+            return style.en_text_color, style.en_highlight_color
+        return style.es_text_color, style.es_highlight_color
+    return style.text_color, style.highlight_color
 
 
 def _render_overlay(
@@ -101,6 +113,7 @@ def _render_overlay(
     style: CaptionStyle,
     work_dir: Path,
     words: list[WordTick],
+    force_lang: str = "",
 ) -> Path:
     width, height = _video_size(video)
     fps_num, fps_den = _overlay_rate(*video_frame_rate(video))
@@ -148,7 +161,8 @@ def _render_overlay(
             for cue_index, (start, end, text) in enumerate(placed):
                 if start > cursor + 1e-4:
                     timeline.append((blank, start - cursor))
-                spec, samples = _cue_plan(style.preset, text, end - start, frame_dt, font_px, style, words, start)
+                lang = force_lang or _cue_lang(Cue(index=cue_index, start=start, end=end, text=text), words)
+                spec, samples = _cue_plan(style.preset, text, end - start, frame_dt, font_px, style, words, start, lang)
                 page.evaluate("(spec) => window.loadCue(spec)", spec)
                 for sample_index, (seek, span) in enumerate(samples):
                     page.evaluate("(time) => window.seek(time)", seek)
@@ -188,7 +202,7 @@ def _overlay_rate(num: int, den: int) -> tuple[int, int]:
 
 
 def _strip_height(video_height: int, font_px: int) -> int:
-    raw = max(font_px * 3 + 48, round(video_height * 0.22))
+    raw = font_px + 36
     raw = min(raw, video_height)
     if raw % 2:
         raw -= 1
@@ -225,24 +239,33 @@ def _heard_marks(
     intro: float,
     cue_start: float,
     spoken: list[WordTick],
+    lang: str = "",
 ) -> list[dict[str, float]]:
     """El resalte dura lo que dura la palabra oída, no una rebanada igual del cue."""
     cue_end = cue_start + duration
-    inside = [word for word in spoken if word.end > cue_start + 0.02 and word.start < cue_end - 0.02]
+    pool = spoken
+    if lang == "en":
+        tagged = [word for word in spoken if word.lang == "en"]
+        if tagged:
+            pool = tagged
+    elif lang == "es":
+        tagged = [word for word in spoken if word.lang != "en"]
+        if tagged:
+            pool = tagged
+    inside = [word for word in pool if word.end > cue_start + 0.02 and word.start < cue_end - 0.02]
     if not tokens:
         return []
     if not inside or abs(len(inside) - len(tokens)) > max(1, len(tokens) // 3):
         each = duration / len(tokens)
         return [
-            {"start": intro + index * each, "fade": min(0.08, each * 0.3), "stay": max(0.04, each * 0.7)}
+            {"start": index * each, "fade": 0.0, "stay": each}
             for index in range(len(tokens))
         ]
     marks: list[dict[str, float]] = []
     for word in inside[: len(tokens)]:
         local = max(0.0, word.start - cue_start)
         stay = max(0.04, min(word.end, cue_end) - max(word.start, cue_start))
-        fade = min(0.08, stay * 0.25)
-        marks.append({"start": local, "fade": fade, "stay": max(0.02, stay - fade)})
+        marks.append({"start": local, "fade": 0.0, "stay": stay})
     return marks
 
 
@@ -255,13 +278,14 @@ def _cue_plan(
     style: CaptionStyle,
     spoken: list[WordTick] | None = None,
     cue_start: float = 0.0,
+    lang: str = "",
 ) -> tuple[dict[str, object], list[tuple[float, float]]]:
     intro, outro = _motion_spans(duration, frame_dt)
     tokens = text.split() or [text]
     marks: list[dict[str, float]] = []
     type_window = intro
     if preset == "highlight":
-        marks = _heard_marks(tokens, duration, intro, cue_start, spoken or [])
+        marks = _heard_marks(tokens, duration, intro, cue_start, spoken or [], lang)
     elif preset == "typewriter":
         type_window = max(intro, (duration - outro) * 0.45)
 
@@ -272,8 +296,8 @@ def _cue_plan(
         "intro": intro,
         "outro": outro,
         "typeWindow": type_window,
-        "textColor": style.text_color,
-        "highlightColor": style.highlight_color,
+        "textColor": _caption_colors(style, lang or "es")[0],
+        "highlightColor": _caption_colors(style, lang or "es")[1],
         "fontPx": font_px,
         "marks": marks,
     }
@@ -287,20 +311,8 @@ def _cue_plan(
 
 
 def _motion_spans(duration: float, frame_dt: float) -> tuple[float, float]:
-    if duration <= frame_dt * 2:
-        return 0.0, 0.0
-    intro_n = max(1, round(min(0.18, duration * 0.35) / frame_dt))
-    outro_n = max(1, round(min(0.12, duration * 0.2) / frame_dt))
-    while (intro_n + outro_n) * frame_dt >= duration and (intro_n > 1 or outro_n > 1):
-        if intro_n >= outro_n and intro_n > 1:
-            intro_n -= 1
-        elif outro_n > 1:
-            outro_n -= 1
-        else:
-            break
-    if (intro_n + outro_n) * frame_dt >= duration:
-        return 0.0, 0.0
-    return intro_n * frame_dt, outro_n * frame_dt
+    del duration, frame_dt
+    return 0.0, 0.0
 
 
 def _window_samples(duration: float, frame_dt: float, head: float, outro: float) -> list[tuple[float, float]]:
@@ -329,23 +341,50 @@ def _highlight_samples(
     outro: float,
     marks: list[dict[str, float]],
 ) -> list[tuple[float, float]]:
-    samples = _window_samples(intro, frame_dt, intro, 0.0) if intro > 0 else []
-    for mark in marks:
-        samples.append((mark["start"] + mark["fade"], max(frame_dt, mark["stay"])))
-    if outro > 0:
-        for index in range(max(1, round(outro / frame_dt))):
-            samples.append((duration - outro + index * frame_dt, frame_dt))
+    """El fotograma se muestra en el tiempo de la palabra, no al acabar la anterior."""
+    del intro, outro
+    samples: list[tuple[float, float]] = []
+    cursor = 0.0
+    ordered = sorted(marks, key=lambda mark: float(mark["start"]))
+    for index, mark in enumerate(ordered):
+        at = min(duration, max(0.0, float(mark["start"])))
+        if index + 1 < len(ordered):
+            off = min(duration, max(at, float(ordered[index + 1]["start"])))
+        else:
+            off = min(duration, max(at, at + float(mark["stay"])))
+        if at > cursor + 1e-4:
+            samples.append((min(cursor, duration), at - cursor))
+        if off > at + 1e-4:
+            samples.append((min(duration, at + frame_dt * 0.5), off - at))
+        cursor = max(cursor, off)
+    if duration - cursor > 1e-4:
+        samples.append((min(cursor, duration), duration - cursor))
     return samples or [(0.0, duration)]
 
 
 def _fit(samples: list[tuple[float, float]], duration: float) -> list[tuple[float, float]]:
+    if duration <= 0:
+        return [(0.0, 0.04)]
     if not samples:
         return [(0.0, duration)]
     total = sum(span for _, span in samples)
     seek, span = samples[-1]
     span += duration - total
     if span <= 0:
-        raise RuntimeError("La animación no cubre la duración de la frase")
+        fitted: list[tuple[float, float]] = []
+        for sample_at, sample_span in samples:
+            if sample_at >= duration - 1e-4:
+                break
+            room = duration - sample_at
+            if room <= 1e-4:
+                continue
+            fitted.append((sample_at, min(sample_span, room)))
+        if not fitted:
+            return [(0.0, duration)]
+        last_at, last_span = fitted[-1]
+        if last_at + last_span < duration - 1e-4:
+            fitted[-1] = (last_at, duration - last_at)
+        return fitted
     fitted = list(samples[:-1])
     fitted.append((seek, span))
     return fitted

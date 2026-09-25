@@ -350,6 +350,11 @@ export function ReviewDesk({
       position: style.position,
       size: style.size,
       caption_preview: Boolean(style.caption_preview),
+      lang_colors: Boolean(style.lang_colors),
+      es_text_color: style.es_text_color,
+      es_highlight_color: style.es_highlight_color,
+      en_text_color: style.en_text_color,
+      en_highlight_color: style.en_highlight_color,
     };
     try {
       const saved = await fetch(`/api/jobs/${job.job_id}/files/${item.file_id}/review`, {
@@ -577,12 +582,16 @@ function CaptionLine({
   const local = Math.max(0, time - cue.start);
   const intro = Math.min(0.18, duration * 0.3);
   const pop = Math.min(1, local / Math.max(intro, 0.04));
-  const heard = words.filter((word) => word.end > cue.start && word.start < cue.end);
-  const highlightAt = heard.findIndex((word) => time >= word.start && time < word.end);
+  const sameLang = words.filter((word) => word.end > cue.start && word.start < cue.end && (cue.lang === "en" ? word.lang === "en" : word.lang !== "en"));
+  const heard = sameLang.length > 0 ? sameLang : words.filter((word) => word.end > cue.start && word.start < cue.end);
+  const spokenNow = heard.findIndex((word) => time >= word.start && time < word.end);
+  const highlightAt = spokenNow >= 0 && spokenNow < tokens.length
+    ? spokenNow
+    : Math.min(tokens.length - 1, Math.floor((local / duration) * tokens.length));
   const splitColors = style.preset === "highlight" && style.lang_colors;
   const englishCue = cue.lang === "en";
-  const baseColor = splitColors ? (englishCue ? style.en_text_color ?? "#38bdf8" : style.es_text_color ?? style.text_color) : style.text_color;
-  const heardColor = splitColors ? (englishCue ? style.en_highlight_color ?? "#e0f2fe" : style.es_highlight_color ?? style.highlight_color) : style.highlight_color;
+  const baseColor = splitColors ? (englishCue ? style.en_text_color ?? "#ffffff" : style.es_text_color ?? style.text_color) : style.text_color;
+  const heardColor = splitColors ? (englishCue ? style.en_highlight_color ?? "#0094ff" : style.es_highlight_color ?? style.highlight_color) : style.highlight_color;
   const ratio = SIZE_RATIO[style.size as keyof typeof SIZE_RATIO] ?? SIZE_RATIO.md;
   const typed =
     style.preset === "typewriter"

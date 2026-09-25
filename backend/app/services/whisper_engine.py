@@ -29,6 +29,16 @@ def get_model() -> object:
     return _model
 
 
+def release_model() -> None:
+    """Suelta Whisper de la GPU antes de cargar el alineador del texto final."""
+    global _model
+    with _lock:
+        _model = None
+    import gc
+
+    gc.collect()
+
+
 def transcribe_spanish(audio_path: Path, on_progress=None) -> tuple[list[Cue], list[SpokenWord]]:
     """
     PROPÓSITO: Alinear palabras del audio ya cortado, aunque la clase mezcle español e inglés.
@@ -43,16 +53,20 @@ def transcribe_spanish(audio_path: Path, on_progress=None) -> tuple[list[Cue], l
     words: list[SpokenWord] = []
     duration = max(float(info.duration or 0), 0.001)
     for segment in segments:
-        if on_progress is not None:
-            on_progress(min(1.0, float(segment.end) / duration))
-        if segment.words:
-            for word in segment.words:
+        batch = segment.words or []
+        if batch:
+            for word in batch:
                 token = word.word.strip()
-                if token:
-                    words.append(SpokenWord(float(word.start), float(word.end), token, word_language(token)))
+                if not token:
+                    continue
+                words.append(SpokenWord(float(word.start), float(word.end), token, word_language(token)))
+                if on_progress is not None:
+                    on_progress(min(1.0, float(word.end) / duration), len(words), token)
             continue
         text = segment.text.strip()
         if text:
             words.append(SpokenWord(float(segment.start), float(segment.end), text, word_language(text)))
+            if on_progress is not None:
+                on_progress(min(1.0, float(segment.end) / duration), len(words), text)
 
     return group_words(words), words

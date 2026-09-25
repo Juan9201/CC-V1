@@ -1,0 +1,11 @@
+{
+  "name": "cc-v1",
+  "private": true,
+  "description": "Instala el entorno local de CC-V1 y levanta el editor de subtítulos.",
+  "bin": {
+    "cc-setup": "./scripts/cc-setup.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

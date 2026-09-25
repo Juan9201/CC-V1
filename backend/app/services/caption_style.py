@@ -52,6 +52,11 @@ def parse_caption_style(
     size: str,
     track: str,
     mode: str = "auto",
+    lang_colors: bool = True,
+    es_text_color: str = "#FFFFFF",
+    es_highlight_color: str = "#22C55E",
+    en_text_color: str = "#FFFFFF",
+    en_highlight_color: str = "#0094FF",
 ) -> CaptionStyle:
     """
     PROPÓSITO: Validar el estilo que llega con el lote.
@@ -67,7 +72,15 @@ def parse_caption_style(
         raise ValueError("Idioma no válido")
     if mode not in _MODES:
         raise ValueError("Modo no válido")
-    if _COLOR.fullmatch(text_color) is None or _COLOR.fullmatch(highlight_color) is None:
+    colors = {
+        "text_color": text_color,
+        "highlight_color": highlight_color,
+        "es_text_color": es_text_color,
+        "es_highlight_color": es_highlight_color,
+        "en_text_color": en_text_color,
+        "en_highlight_color": en_highlight_color,
+    }
+    if any(_COLOR.fullmatch(value) is None for value in colors.values()):
         raise ValueError("El color tiene que ser #RRGGBB")
     resolve_font(font)
     return CaptionStyle(
@@ -75,6 +88,11 @@ def parse_caption_style(
         font=font,
         text_color=text_color.upper(),
         highlight_color=highlight_color.upper(),
+        lang_colors=lang_colors,
+        es_text_color=es_text_color.upper(),
+        es_highlight_color=es_highlight_color.upper(),
+        en_text_color=en_text_color.upper(),
+        en_highlight_color=en_highlight_color.upper(),
         position=position,  # type: ignore[arg-type]
         size=size,  # type: ignore[arg-type]
         track=track,  # type: ignore[arg-type]

@@ -73,6 +73,11 @@ class CaptionStyle(BaseModel):
     track: Literal["es", "en", "both"] = "both"
     mode: Literal["auto", "review"] = "auto"
     caption_preview: bool = False
+    lang_colors: bool = True
+    es_text_color: str = "#FFFFFF"
+    es_highlight_color: str = "#22C55E"
+    en_text_color: str = "#FFFFFF"
+    en_highlight_color: str = "#0094FF"
 
 
 class ProgressStep(BaseModel):
@@ -84,6 +89,8 @@ class JobProgress(BaseModel):
     steps: list[ProgressStep] = Field(default_factory=list)
     index: int = 0
     sub_ratio: float = 0
+    sub_done: int = 0
+    sub_total: int = 0
     sub_label: str = ""
 
 
